@@ -486,7 +486,7 @@ final class AppModel: ObservableObject, MediaSessionModel {
 
     /// Toggle a single station in/out of the QuickMix include set (sheet rows).
     func toggleQuickMixPick(_ stableId: String) {
-        quickMixPicked.toggle(stableId)
+        quickMixPicked.toggle(member: stableId)
     }
 
     /// Apply the checked station set: register it with Pandora, then refresh
@@ -1070,7 +1070,7 @@ private struct GridButtonStyle: ButtonStyle {
 /// QuickMix station and, if the currently playing song is from a station that
 /// is no longer included, skips to a new song (issue #24).
 struct StationSelectSheet: View {
-    @ObservedObject var model: PianoAppModel
+    @ObservedObject var model: AppModel
 
     /// Rows are the non-QuickMix stations (the sources to blend); the
     /// currently-selected QuickMix station is excluded by the model's
