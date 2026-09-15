@@ -317,8 +317,11 @@ final class AppModel: ObservableObject, MediaSessionModel {
         }
         if isCurrentLoved {
             lovedSongIDs.remove(song.id)
-            if song.rating == PIANO_RATE_LOVE {
-                song.raw.pointee.rating = PIANO_RATE_NONE
+            // Clear the server-loved flag on the stored copy so the heart
+            // un-highlights (Pandora has no un-love API; this is local state).
+            if song.rating == PIANO_RATE_LOVE,
+               let i = playlist.firstIndex(where: { $0.id == song.id }) {
+                playlist[i].rating = PIANO_RATE_NONE
             }
             status = "Un-loved."
         } else {
