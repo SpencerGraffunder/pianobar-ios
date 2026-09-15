@@ -486,7 +486,11 @@ final class AppModel: ObservableObject, MediaSessionModel {
 
     /// Toggle a single station in/out of the QuickMix include set (sheet rows).
     func toggleQuickMixPick(_ stableId: String) {
-        quickMixPicked.toggle(member: stableId)
+        if quickMixPicked.contains(stableId) {
+            quickMixPicked.remove(stableId)
+        } else {
+            quickMixPicked.insert(stableId)
+        }
     }
 
     /// Apply the checked station set: register it with Pandora, then refresh
