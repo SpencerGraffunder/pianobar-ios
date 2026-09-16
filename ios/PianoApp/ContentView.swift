@@ -325,6 +325,7 @@ final class AppModel: ObservableObject, MediaSessionModel {
             guard let self else { return }
             let songs = try await client.getPlaylist(station: station)
             self.playlist = songs
+            self.markStationCurrent(station)
             self.showUpcoming = false
             self.playIfAvailable()
         }
@@ -350,6 +351,7 @@ final class AppModel: ObservableObject, MediaSessionModel {
         guard let client = client, let station = selectedStation else { return }
         let songs = try await client.getPlaylist(station: station)
         playlist = songs
+        markStationCurrent(station)
         showUpcoming = false
         playIfAvailable()
     }
@@ -422,6 +424,34 @@ final class AppModel: ObservableObject, MediaSessionModel {
 
     // MARK: Station management
 
+    /// The station a playlist was last fetched for. Lets us distinguish a
+    /// real user switch from the initial selection after login, so the
+    /// station picker's onChange doesn't trigger a redundant fetch.
+    private var lastStationID: String?
+
+    /// Record that the playlist now belongs to this station.
+    private func markStationCurrent(_ station: Station) {
+        lastStationID = station.stableId
+    }
+
+    /// Fired when the user switches stations in the picker: drop the
+    /// previous station's queue and start a song from the new station.
+    /// Without this, the current song + playback keep pointing at the
+    /// old station's queue until the user taps Next. Requires that a
+    /// station was already active (lastStationID set), so the initial
+    /// auto-selection at login does NOT trigger a fetch — the app still
+    /// waits for an explicit Play/Next there.
+    func stationDidChange() {
+        guard let station = selectedStation,
+              let last = lastStationID,
+              station.stableId != last else { return }
+        playlist = []
+        showUpcoming = false
+        player.stop()
+        media.clearNowPlaying()
+        nextSong()
+    }
+
     func startRename() {
         guard let station = selectedStation else {
             status = "Pick a station first."
@@ -483,6 +513,7 @@ final class AppModel: ObservableObject, MediaSessionModel {
             if let st = self.selectedStation {
                 let songs = try await client.getPlaylist(station: st)
                 self.playlist = songs
+                self.markStationCurrent(st)
                 self.showUpcoming = false
                 self.playIfAvailable()
             }
@@ -733,6 +764,12 @@ struct ContentView: View {
                 }
             }
             .pickerStyle(.menu)
+            // Switching stations must start a song from the NEW station —
+            // otherwise the current-song card and playback keep pointing at
+            // the previous station's queue until the user taps Next.
+            .onChange(of: model.selectedStationID) { _ in
+                model.stationDidChange()
+            }
         }
     }
 
