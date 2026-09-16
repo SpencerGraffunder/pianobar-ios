@@ -153,10 +153,15 @@ final class AppModel: ObservableObject, MediaSessionModel {
 
     var upcoming: [Song] { Array(playlist.dropFirst()) }
 
-    /// Whether the currently-playing song has been loved (toggle state).
+    /// Whether the currently-playing song is loved. True if the user loved
+    /// it this session, OR if the server says so: the core parses the
+    /// playlist's `songRating: 1` into `song->rating == PIANO_RATE_LOVE`
+    /// (response.c GET_PLAYLIST), which covers songs loved days ago or from
+    /// a different client.
     var isCurrentLoved: Bool {
         guard let s = currentSong else { return false }
-        return lovedSongIDs.contains(s.id)
+        return s.rating == PIANO_RATE_LOVE
+            || lovedSongIDs.contains(s.id)
     }
 
     // MARK: - Actions (each runs one C-core exchange; state stays on main)
@@ -371,14 +376,23 @@ final class AppModel: ObservableObject, MediaSessionModel {
     /// Love is a toggle on the current song (it does NOT skip):
     ///  - first press: registers the love with Pandora + colors the heart
     ///  - second press on the same song: un-colors it (clears local state).
-    /// Pandora has no "un-love" API, so the second press only clears state.
+    /// "Loved" includes songs the server already marked loved (see
+    /// isCurrentLoved), so the second press must also clear the rating the
+    /// core read from the server — Pandora has no "un-love" API, so that
+    /// only clears local state.
     func toggleLove() {
         guard let song = currentSong else {
             status = "Play a song first."
             return
         }
-        if lovedSongIDs.contains(song.id) {
+        if isCurrentLoved {
             lovedSongIDs.remove(song.id)
+            // Clear the server-loved flag on the stored copy so the heart
+            // un-highlights (Pandora has no un-love API; this is local state).
+            if song.rating == PIANO_RATE_LOVE,
+               let i = playlist.firstIndex(where: { $0.id == song.id }) {
+                playlist[i].rating = PIANO_RATE_NONE
+            }
             status = "Un-loved."
         } else {
             lovedSongIDs.insert(song.id)
