@@ -238,14 +238,60 @@ final class SongSaverTests: XCTestCase {
             .appendingPathComponent("pianobar-test-out-\(UUID().uuidString).m4a")
         defer { try? FileManager.default.removeItem(at: output) }
 
-        try await SongSaver.transcode(
-            input: input, output: output,
-            preset: AVAssetExportPresetAppleM4A)
+        try await SongSaver.transcode(input: input, output: output)
 
         XCTAssertTrue(FileManager.default.fileExists(atPath: output.path))
         let asset = AVURLAsset(url: output)
         let duration = try await asset.load(.duration)
         XCTAssertGreaterThan(duration.seconds, 0)
+        let size = try FileManager.default
+            .attributesOfItem(atPath: output.path)[.size] as? Int ?? 0
+        XCTAssertGreaterThan(size, 1000)
+    }
+
+    /// Regression for issue #23: the real failure was the *encoded* source
+    /// path — Pandora streams arrive as AAC/HE-AAC, which the old
+    /// AVAssetExportSession rejected ("The operation couldn't be
+    /// completed"). This encodes a source file with AVAudioFile (AAC in
+    /// .m4a), then transcodes it through the new reader/writer pipeline,
+    /// proving decode → re-encode works for compressed (not just PCM) input.
+    func testTranscodeFromEncodedAACSource() async throws {
+        // 1. Make a PCM source.
+        let pcm = try makeLocalAudioFile(seconds: 0.3)
+        defer { try? FileManager.default.removeItem(at: pcm) }
+
+        // 2. Encode it to AAC/.m4a with AVAudioFile (mirrors what
+        //    Pandora's CDN serves).
+        let aac = URL.temporaryDirectory
+            .appendingPathComponent("pianobar-aac-src-\(UUID().uuidString).m4a")
+        defer { try? FileManager.default.removeItem(at: aac) }
+        try await Task.detached(priority: .userInitiated) {
+            let inFile = try AVAudioFile(forReading: pcm)
+            let outFile = try AVAudioFile(forWriting: aac, settings: [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVSampleRateKey: 44100,
+                AVNumberOfChannelsKey: 2,
+                AVEncoderBitRateKey: 64_000,
+            ])
+            let frames = AVAudioFrameCount(0.3 * 44100)
+            let buf = AVAudioPCMBuffer(
+                pcmFormat: inFile.processingFormat, frameCapacity: frames)!
+            buf.frameLength = frames
+            try inFile.read(into: buf)
+            try outFile.write(from: buf)
+            if #available(iOS 18.0, *) { inFile.close(); outFile.close() }
+        }.value
+
+        // 3. Transcode it — the exact shape of the production pipeline.
+        let output = URL.temporaryDirectory
+            .appendingPathComponent("pianobar-test-out-\(UUID().uuidString).m4a")
+        defer { try? FileManager.default.removeItem(at: output) }
+        try await SongSaver.transcode(input: aac, output: output)
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: output.path))
+        let asset = AVURLAsset(url: output)
+        let duration = try await asset.load(.duration)
+        XCTAssertGreaterThan(duration.seconds, 0.1)
         let size = try FileManager.default
             .attributesOfItem(atPath: output.path)[.size] as? Int ?? 0
         XCTAssertGreaterThan(size, 1000)
@@ -257,13 +303,11 @@ final class SongSaverTests: XCTestCase {
         let output = URL.temporaryDirectory
             .appendingPathComponent("out-\(UUID().uuidString).m4a")
         do {
-            _ = try await SongSaver.transcode(
-                input: missing, output: output,
-                preset: AVAssetExportPresetAppleM4A)
+            _ = try await SongSaver.transcode(input: missing, output: output)
             XCTFail("expected transcode to throw")
         } catch {
-            // A real transcode failure: the error carries a domain (Cocoa /
-            // AVFoundation) and no output file is produced.
+            // A real transcode failure: the error carries a domain
+            // (Cocoa / AVFoundation) and no output file is produced.
             XCTAssertFalse((error as NSError).domain.isEmpty)
             XCTAssertFalse(FileManager.default.fileExists(atPath: output.path))
         }
