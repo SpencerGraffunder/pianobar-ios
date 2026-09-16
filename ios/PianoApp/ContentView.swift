@@ -66,6 +66,11 @@ final class AppModel: ObservableObject, MediaSessionModel {
     @Published var shareItem: ShareItem?
     /// Help sheet (explains every button).
     @Published var showHelp = false
+    /// "Select stations" (QuickMix) sheet (issue #24): a checkmark list of the
+    /// non-QuickMix stations the user wants included in the mix.
+    @Published var showStationSelect = false
+    /// Station ids (stableId) currently checked in that sheet.
+    @Published var quickMixPicked: Set<String> = []
 
     private var client: PianoClient?
     private var working = false
@@ -503,36 +508,73 @@ final class AppModel: ObservableObject, MediaSessionModel {
         }
     }
 
-    // MARK: Quick mix
+    // MARK: Quick mix / station selection (issue #24)
 
-    func toggleQuickMix() {
-        guard let client = client, let station = selectedStation else {
-            status = "Pick a station first."
+    /// Stations eligible for the QuickMix include list (everything except the
+    /// QuickMix station itself).
+    var stationSelectList: [Station] {
+        stations.filter { !$0.isQuickMix }
+    }
+
+    /// Open the "Select stations" sheet (issue #24). Tapping the button now
+    /// shows a checkmark list instead of blindly toggling everything on/off —
+    /// the old behavior sent an empty mix list to Pandora on the first tap
+    /// (which it rejected with an unmapped error) and then always skipped the
+    /// current song.
+    func openStationSelect() {
+        quickMixPicked = Set(
+            stations.filter { $0.useQuickMix && !$0.isQuickMix }
+                .map { $0.stableId })
+        showStationSelect = true
+    }
+
+    /// Toggle a single station in/out of the QuickMix include set (sheet rows).
+    func toggleQuickMixPick(_ stableId: String) {
+        if quickMixPicked.contains(stableId) {
+            quickMixPicked.remove(stableId)
+        } else {
+            quickMixPicked.insert(stableId)
+        }
+    }
+
+    /// Apply the checked station set: register it with Pandora, then refresh
+    /// the playlist only if the currently-playing song is NOT from one of the
+    /// selected stations (per issue #24). An empty selection is rejected
+    /// locally because it is the root of the first-tap error.
+    func applyStationSelect() {
+        let picked = quickMixPicked
+        showStationSelect = false
+        guard !picked.isEmpty else {
+            status = "Select at least one station to include."
             return
         }
-        guard station.isQuickMix else {
-            status = "The current station is not a QuickMix station."
+        guard let client = client else {
+            status = "Log in first."
             return
         }
-        // Toggle in C (include all if none are included, clear all if any
-        // are), then apply the selection on the server.
-        run("Select Stations") { [weak self] in
+        let included: Set<String> = picked
+        run("Select stations") { [weak self] in
             guard let self else { return }
-            // Set the selection in C (operates on the core's authoritative
-            // station list — no Swift-held raw pointers), then tell the
-            // server. This is what makes it work without crashing.
-            let included = client.toggleQuickMixSelection()
+            // Mirror the checkmark set onto the C core's useQuickMix flags so
+            // setQuickMix() sends exactly the included non-QuickMix stations
+            // (operating on the core's authoritative station list, as the old
+            // toggle did — no Swift-held raw pointers).
+            for s in self.stations where !s.isQuickMix {
+                s.raw.pointee.useQuickMix = included.contains(s.stableId) ? 1 : 0
+            }
             try await client.setQuickMix()
-            // Pick up the new mix.
-            if let st = self.selectedStation {
+            self.status = "Stations updated: \(included.count) included."
+            // Only skip to a new song if the current one is from a station the
+            // user just excluded. If it's still included, keep playing it.
+            let currentStationId = self.currentSong?.stationId
+            let keepPlaying = currentStationId.map { included.contains($0) } ?? false
+            if !keepPlaying, let st = self.selectedStation {
                 let songs = try await client.getPlaylist(station: st)
                 self.playlist = songs
                 self.markStationCurrent(st)
                 self.showUpcoming = false
                 self.playIfAvailable()
             }
-            self.status = included ? "All stations included in QuickMix."
-                : "QuickMix cleared."
         }
     }
 
@@ -750,6 +792,9 @@ struct ContentView: View {
         .sheet(isPresented: $model.showHelp) {
             HelpSheet()
         }
+        .sheet(isPresented: $model.showStationSelect) {
+            StationSelectSheet(model: model)
+        }
         .sheet(item: $model.shareItem) { ShareSheet(url: $0.url) }
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
@@ -847,7 +892,7 @@ struct ContentView: View {
             .init(id: "quickmix", title: "Select Stations", systemImage: "shuffle",
                   role: .normal,
                   enabled: hasStation && model.selectedStation?.isQuickMix == true,
-                  action: model.toggleQuickMix),
+                  action: model.openStationSelect),
             .init(id: "device", title: "Device", systemImage: "hifispeaker",
                   role: .normal, enabled: true, isDevicePicker: true,
                   action: {}),
@@ -1073,6 +1118,84 @@ private struct GridButtonStyle: ButtonStyle {
     ContentView()
 }
 
+// MARK: - Select stations sheet (QuickMix include list, issue #24)
+
+/// Checkmark list of the stations to blend into a QuickMix. Tapping a row
+/// toggles it in/out of the include set; "Apply" sends the selection to the
+/// QuickMix station and, if the currently playing song is from a station that
+/// is no longer included, skips to a new song (issue #24).
+struct StationSelectSheet: View {
+    @ObservedObject var model: AppModel
+
+    /// Rows are the non-QuickMix stations (the sources to blend); the
+    /// currently-selected QuickMix station is excluded by the model's
+    /// `stationSelectList`.
+    private var rows: [StationPickRow] {
+        model.stationSelectList.map { s in
+            StationPickRow(station: s,
+                           picked: model.quickMixPicked.contains(s.stableId))
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    ForEach(rows) { row in
+                        Button {
+                            model.toggleQuickMixPick(row.station.stableId)
+                        } label: {
+                            HStack {
+                                Text(row.station.name ?? "(unnamed)")
+                                    .lineLimit(1)
+                                Spacer()
+                                if row.picked {
+                                    Image(systemName: "checkmark")
+                                        .font(.body.weight(.semibold))
+                                        .foregroundStyle(.tint)
+                                }
+                            }
+                        }
+                        .foregroundStyle(.primary)
+                    }
+                } header: {
+                    Text("Stations to blend into QuickMix")
+                } footer: {
+                    Text("Songs only play from checked stations. Unchecked stations are excluded from the mix.")
+                }
+
+                Section {
+                    Button {
+                        model.applyStationSelect()
+                    } label: {
+                        HStack {
+                            Spacer()
+                            Text("Apply")
+                                .fontWeight(.semibold)
+                            Spacer()
+                        }
+                    }
+                    .disabled(model.quickMixPicked.isEmpty)
+                }
+            }
+            .navigationTitle("Select Stations")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { model.showStationSelect = false }
+                }
+            }
+        }
+    }
+}
+
+/// One row in the "Select Stations" list.
+private struct StationPickRow: Identifiable {
+    let station: Station
+    let picked: Bool
+    var id: String { station.stableId }
+}
+
 // MARK: - Help sheet (what each button does)
 
 /// One row in the help sheet: icon, name, one-sentence explanation.
@@ -1111,8 +1234,8 @@ struct HelpSheet: View {
                   detail: "Renames the currently selected station."),
         HelpEntry(id: "delete", title: "Delete", systemImage: "trash",
                   detail: "Deletes the currently selected station from your account."),
-        HelpEntry(id: "quickmix", title: "Quick Mix", systemImage: "shuffle",
-                  detail: "On a QuickMix station, switches which of your stations it blends and plays the new mix."),
+        HelpEntry(id: "quickmix", title: "Select Stations", systemImage: "shuffle",
+                  detail: "On a QuickMix station, choose which of your stations to blend into the mix (checkmark list). Only skips to a new song if the current song is from an excluded station."),
         HelpEntry(id: "device", title: "Device", systemImage: "hifispeaker",
                   detail: "Opens the system picker to choose where audio plays (speaker, headphones, Bluetooth, AirPlay)."),
         HelpEntry(id: "save", title: "Save", systemImage: "square.and.arrow.down",
