@@ -43,6 +43,10 @@ protocol MediaSessionModel: AnyObject {
     var npDuration: Double { get }
     /// Elapsed playback time of the current song in seconds.
     var npElapsed: Double { get }
+    /// Whether the player is actually producing audio right now. Drives
+    /// the Now Playing transport icon — intent alone would flicker while
+    /// the stream is still buffering.
+    func npActivelyPlaying() -> Bool
     func modelPlay()
     func modelPause()
     func modelNext()
@@ -126,15 +130,24 @@ final class MediaSession {
 
     /// Publish the current song + transport state to the system
     /// Now Playing UI (lock screen / Control Center / Dynamic Island).
+    ///
+    /// `playing` is the user's *intent* — it drives the elapsed-time
+    /// timer (keep refreshing the position while we're meant to be
+    /// playing). `activelyPlaying` is what AVPlayer is *actually doing*
+    /// right now — it drives the transport icon. Separating the two is
+    /// what stops the Control Center icon flickering play→pause→play
+    /// while a stream is still buffering: we no longer claim "playing"
+    /// until audio is really flowing.
     func updateNowPlaying(title: String?, artist: String?, album: String?,
-                          duration: Double, elapsed: Double, playing: Bool) {
+                          duration: Double, elapsed: Double,
+                          playing: Bool, activelyPlaying: Bool) {
         var info: [String: Any] = [:]
         if let t = title { info[MPMediaItemPropertyTitle] = t }
         if let a = artist { info[MPMediaItemPropertyArtist] = a }
         if let al = album { info[MPMediaItemPropertyAlbumTitle] = al }
         if duration > 0 { info[MPMediaItemPropertyPlaybackDuration] = duration }
         info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = max(0, elapsed)
-        info[MPNowPlayingInfoPropertyPlaybackRate] = playing ? 1.0 : 0.0
+        info[MPNowPlayingInfoPropertyPlaybackRate] = activelyPlaying ? 1.0 : 0.0
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
         if playing {
             startElapsedTimer()
@@ -157,7 +170,8 @@ final class MediaSession {
                       m.isPlayingNow else { return }
                 self.updateNowPlaying(
                     title: m.npTitle, artist: m.npArtist, album: m.npAlbum,
-                    duration: m.npDuration, elapsed: m.npElapsed, playing: true)
+                    duration: m.npDuration, elapsed: m.npElapsed,
+                    playing: true, activelyPlaying: m.npActivelyPlaying())
             }
         }
         RunLoop.main.add(t, forMode: .common)

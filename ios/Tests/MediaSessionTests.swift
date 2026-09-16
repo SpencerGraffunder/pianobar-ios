@@ -20,11 +20,13 @@ import XCTest
 
 private final class FakePlayer: PlayerLike {
     var isPlaying = false
+    /// What "actively playing" reports (drives the Now Playing icon).
+    var activelyPlaying = false
     var playCount = 0
     var pauseCount = 0
 
-    func play() { isPlaying = true; playCount += 1 }
-    func pause() { isPlaying = false; pauseCount += 1 }
+    func play() { isPlaying = true; activelyPlaying = true; playCount += 1 }
+    func pause() { isPlaying = false; activelyPlaying = false; pauseCount += 1 }
 }
 
 @MainActor
@@ -42,6 +44,8 @@ private final class FakeModel: MediaSessionModel {
     var prevCount = 0
     var canResume = true
     var isPlayingNow: Bool { player.isPlaying }
+
+    func npActivelyPlaying() -> Bool { player.activelyPlaying }
 
     func modelPlay() {
         player.play()
@@ -70,7 +74,8 @@ final class NowPlayingTests: XCTestCase {
         let (session, model) = makeSession()
         session.updateNowPlaying(
             title: model.npTitle, artist: model.npArtist, album: model.npAlbum,
-            duration: model.npDuration, elapsed: model.npElapsed, playing: true)
+            duration: model.npDuration, elapsed: model.npElapsed,
+            playing: true, activelyPlaying: true)
 
         let info = MPNowPlayingInfoCenter.default().nowPlayingInfo
         XCTAssertEqual(info?[MPMediaItemPropertyTitle] as? String, "Song Title")
@@ -81,12 +86,39 @@ final class NowPlayingTests: XCTestCase {
         XCTAssertEqual(info?[MPNowPlayingInfoPropertyPlaybackRate] as? Double, 1.0)
     }
 
+    /// The transport icon follows `activelyPlaying`, not the intent flag.
+    /// This is the fix for the Control Center icon flickering
+    /// play→pause→play while a stream is still buffering: while the user
+    /// has hit Play (`playing == true`) but AVPlayer is still buffering
+    /// (`activelyPlaying == false`), the icon must read "paused" — and
+    /// only flip to "playing" once audio is actually flowing.
+    @MainActor
+    func testTransportIconReflectsActivelyPlayingNotIntent() {
+        let (session, model) = makeSession()
+        // User pressed play, but the stream is still buffering.
+        session.updateNowPlaying(
+            title: model.npTitle, artist: model.npArtist, album: model.npAlbum,
+            duration: model.npDuration, elapsed: model.npElapsed,
+            playing: true, activelyPlaying: false)
+        let buffering = MPNowPlayingInfoCenter.default().nowPlayingInfo
+        XCTAssertEqual(buffering?[MPNowPlayingInfoPropertyPlaybackRate] as? Double, 0.0)
+
+        // Audio is now flowing.
+        session.updateNowPlaying(
+            title: model.npTitle, artist: model.npArtist, album: model.npAlbum,
+            duration: model.npDuration, elapsed: model.npElapsed,
+            playing: true, activelyPlaying: true)
+        let playing = MPNowPlayingInfoCenter.default().nowPlayingInfo
+        XCTAssertEqual(playing?[MPNowPlayingInfoPropertyPlaybackRate] as? Double, 1.0)
+    }
+
     @MainActor
     func testPausedStateReportsZeroPlaybackRate() {
         let (session, model) = makeSession()
         session.updateNowPlaying(
             title: model.npTitle, artist: model.npArtist, album: model.npAlbum,
-            duration: model.npDuration, elapsed: model.npElapsed, playing: false)
+            duration: model.npDuration, elapsed: model.npElapsed,
+            playing: false, activelyPlaying: false)
 
         let info = MPNowPlayingInfoCenter.default().nowPlayingInfo
         XCTAssertEqual(info?[MPNowPlayingInfoPropertyPlaybackRate] as? Double, 0.0)
@@ -97,7 +129,7 @@ final class NowPlayingTests: XCTestCase {
         let (session, _) = makeSession()
         session.updateNowPlaying(
             title: "x", artist: nil, album: nil,
-            duration: 0, elapsed: 0, playing: true)
+            duration: 0, elapsed: 0, playing: true, activelyPlaying: true)
         XCTAssertNotNil(MPNowPlayingInfoCenter.default().nowPlayingInfo)
         session.clearNowPlaying()
         XCTAssertNil(MPNowPlayingInfoCenter.default().nowPlayingInfo)

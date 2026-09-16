@@ -127,8 +127,19 @@ final class AppModel: ObservableObject, MediaSessionModel {
 
     var isPlayingNow: Bool { player.isPlaying }
 
+    /// Whether AVPlayer is actually producing audio right now (drives the
+    /// Now Playing transport icon — see MediaSession.updateNowPlaying).
+    func npActivelyPlaying() -> Bool { player.isActivelyPlaying }
+
     func modelPlay() {
-        if let url = currentSong?.audioUrl, let u = URL(string: url) {
+        // Resume the loaded song (lock-screen / Control-Center Play after a
+        // Pause must continue where it stopped). Only (re)start from 0:00
+        // when there is nothing to resume — no song loaded, or the current
+        // one already finished playing.
+        if player.canResume {
+            player.resume()
+            updateNowPlaying()
+        } else if let url = currentSong?.audioUrl, let u = URL(string: url) {
             player.play(url: u)
             updateNowPlaying()
         }
@@ -151,7 +162,8 @@ final class AppModel: ObservableObject, MediaSessionModel {
         media.updateNowPlaying(
             title: npTitle, artist: npArtist, album: npAlbum,
             duration: npDuration, elapsed: npElapsed,
-            playing: player.isPlaying)
+            playing: player.isPlaying,
+            activelyPlaying: player.isActivelyPlaying)
     }
 
     var currentSong: Song? { playlist.first }
@@ -344,6 +356,11 @@ final class AppModel: ObservableObject, MediaSessionModel {
     func togglePlayback() {
         if player.isPlaying {
             player.pause()
+            updateNowPlaying()
+        } else if player.canResume {
+            // A song is loaded and not finished — resume where it stopped
+            // (same fix as the lock-screen/Control-Center path).
+            player.resume()
             updateNowPlaying()
         } else if let url = currentSong?.audioUrl, let u = URL(string: url) {
             player.play(url: u)
