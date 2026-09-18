@@ -1,206 +1,68 @@
-pianobar
-========
+pianobar for iOS
+================
 
-pianobar is a free/open-source, console-based client for the personalized
-online radio Pandora_.
+An iOS port of `pianobar`_, a free/open-source client for the personalized
+online radio Pandora_. Everything here is the iOS app: a simple, button-first
+SwiftUI front end over the original C core. The console client, downloads,
+older releases, and the surrounding ecosystem live on the `upstream project`_ —
+this repo doesn't repeat them.
 
+.. _pianobar: https://github.com/PromyLOPh/pianobar
+.. _upstream project: https://github.com/PromyLOPh/pianobar
 .. _Pandora: http://www.pandora.com
 
-.. image:: https://6xq.net/pianobar/pianobar-screenshot.png
-    :target: https://6xq.net/pianobar/pianobar-screenshot.png
-    :alt: pianobar screenshot
+.. image:: https://github.com/user-attachments/assets/53741f8a-f3ad-4a94-a906-3291ccf0ed1a
+    :alt: pianobar for iOS — single-screen app
 
-Features
---------
+What this port does
+-------------------
 
-- play and manage (create, add more music, delete, rename, ...) stations
-- rate songs and explain why they have been selected
-- upcoming songs/song history
-- customize keybindings and text output (see `configuration example`_)
-- remote control and eventcmd interface (send tracks to last.fm_, for example)
-- proxy support for listeners outside the USA
+The app is a deliberately simple single screen (portrait-locked, no artwork,
+all controls on one screen; a text field + keyboard appears whenever the
+backend asks for input):
 
-.. _last.fm: https://www.last.fm
-.. _configuration example: https://codeberg.org/purplesym/pianobar/src/branch/master/contrib/config-example
+- **Play** — play/pause, skip to the next song (Pandora has no backward skip),
+  volume control, and a stock AirPlay/output picker.
+- **Rate** — love (thumbs up), tired (thumbs down), and "explain this song".
+- **Stations** — see your stations, switch, rename, delete, and create new
+  ones by searching for artists or songs and adding them.
+- **Save** — save the current song to an ``.m4a`` and share it to Music,
+  Files, or any app.
+- **Now Playing** — lock-screen and Control Center controls, plus a live
+  now-playing line, via the Media Session / ``MPNowPlayingInfoCenter`` path.
+- **Sign in** — enter your Pandora account once; credentials are stored in the
+  iOS keychain and you're logged in automatically on the next launch.
 
-Download
---------
+How the port works
+------------------
 
-There are community provided packages available for most Linux distributions
-(see your distribution’s package manager), Mac OS X (via homebrew_)
-and \*BSD as well as a `native Windows port`_.
+The port reuses the unmodified C core (``src/libpiano``) and replaces the
+Linux-only dependencies with iOS equivalents behind small shims:
 
-.. _homebrew: http://brew.sh/
-.. _native Windows Port: https://github.com/thedmd/pianobar-windows
+- ``gcrypt`` (Blowfish) → Apple's CommonCrypto
+- ``libcurl`` → ``URLSession``
+- ``json-c`` → ``JSONSerialization``
+- ``libao``/``ffplay`` audio → ``AVPlayer`` streaming the Pandora stream
 
-The current pianobar release is 2024.12.21_ (sha256__, sign__). More
-recent and experimental code is available at Codeberg_. Older releases
-are available here:
-
-- 2022.04.01_ (sha256__, sign__)
-- 2020.11.28_ (sha256__, sign__)
-- 2020.04.05_ (sha256__, sign__)
-- 2019.02.14_ (sha256__, sign__)
-- 2019.01.25_ (sha256__, sign__)
-- 2018.06.22_ (sha256__, sign__)
-- 2017.08.30_ (sha256__, sign__)
-- 2016.06.02_ (sha256__, sign__)
-- 2015.11.22_ (sha256__, sign__)
-- 2014.09.28_ (sha256__, sign__)
-- 2014.06.08_ (sha256__, sign__)
-- 2013.09.15_ (sha256__, sign__)
-- 2013.05.19_ (sha256__, sign__)
-- 2012.12.01_ (sha256__, sign__)
-- 2012.09.07_ (sha256__, sign__)
-- 2012.06.24_ (sha256__, sign__)
-- 2012.05.06_ (sha256__, sign__)
-- 2012.04.24_ (sha256__, sign__)
-- 2012.01.10_ (sha256__, sign__)
-- 2011.12.11_ (sha256__, sign__)
-- 2011.11.11_ (sha256__, sign__)
-- 2011.11.09_ (sha256__, sign__)
-- 2011.09.22_ (sha256__, sign__)
-- 2011.07.09_ (sha256__, sign__)
-- 2011.04.27_ (sha256__, sign__)
-- 2011.04.10_ (sha256__, sign__)
-- 2011.01.24_ (sha256__)
-- 2010.11.06_ (sha1__)
-- 2010.10.07_ (sha1__)
-- 2010.08.21_ (sha1__)
-
-.. _Codeberg: https://codeberg.org/purplesym/pianobar
-.. _2024.12.21: https://6xq.net/pianobar/pianobar-2024.12.21.tar.bz2
-__ https://6xq.net/pianobar/pianobar-2024.12.21.tar.bz2.sha256
-__ https://6xq.net/pianobar/pianobar-2024.12.21.tar.bz2.asc
-.. _2022.04.01: https://6xq.net/pianobar/pianobar-2022.04.01.tar.bz2
-__ https://6xq.net/pianobar/pianobar-2022.04.01.tar.bz2.sha256
-__ https://6xq.net/pianobar/pianobar-2022.04.01.tar.bz2.asc
-.. _2020.11.28: https://6xq.net/pianobar/pianobar-2020.11.28.tar.bz2
-__ https://6xq.net/pianobar/pianobar-2020.11.28.tar.bz2.sha256
-__ https://6xq.net/pianobar/pianobar-2020.11.28.tar.bz2.asc
-.. _2020.04.05: https://6xq.net/pianobar/pianobar-2020.04.05.tar.bz2
-__ https://6xq.net/pianobar/pianobar-2020.04.05.tar.bz2.sha256
-__ https://6xq.net/pianobar/pianobar-2020.04.05.tar.bz2.asc
-.. _2019.02.14: https://6xq.net/pianobar/pianobar-2019.02.14.tar.bz2
-__ https://6xq.net/pianobar/pianobar-2019.02.14.tar.bz2.sha256
-__ https://6xq.net/pianobar/pianobar-2019.02.14.tar.bz2.asc
-.. _2019.01.25: https://6xq.net/pianobar/pianobar-2019.01.25.tar.bz2
-__ https://6xq.net/pianobar/pianobar-2019.01.25.tar.bz2.sha256
-__ https://6xq.net/pianobar/pianobar-2019.01.25.tar.bz2.asc
-.. _2018.06.22: https://6xq.net/pianobar/pianobar-2018.06.22.tar.bz2
-__ https://6xq.net/pianobar/pianobar-2018.06.22.tar.bz2.sha256
-__ https://6xq.net/pianobar/pianobar-2018.06.22.tar.bz2.asc
-.. _2017.08.30: https://6xq.net/pianobar/pianobar-2017.08.30.tar.bz2
-__ https://6xq.net/pianobar/pianobar-2017.08.30.tar.bz2.sha256
-__ https://6xq.net/pianobar/pianobar-2017.08.30.tar.bz2.asc
-.. _2016.06.02: https://6xq.net/pianobar/pianobar-2016.06.02.tar.bz2
-__ https://6xq.net/pianobar/pianobar-2016.06.02.tar.bz2.sha256
-__ https://6xq.net/pianobar/pianobar-2016.06.02.tar.bz2.asc
-.. _2015.11.22: https://6xq.net/pianobar/pianobar-2015.11.22.tar.bz2
-__ https://6xq.net/pianobar/pianobar-2015.11.22.tar.bz2.sha256
-__ https://6xq.net/pianobar/pianobar-2015.11.22.tar.bz2.asc
-.. _2014.09.28: https://6xq.net/pianobar/pianobar-2014.09.28.tar.bz2
-__ https://6xq.net/pianobar/pianobar-2014.09.28.tar.bz2.sha256
-__ https://6xq.net/pianobar/pianobar-2014.09.28.tar.bz2.asc
-.. _2014.06.08: https://6xq.net/pianobar/pianobar-2014.06.08.tar.bz2
-__ https://6xq.net/pianobar/pianobar-2014.06.08.tar.bz2.sha256
-__ https://6xq.net/pianobar/pianobar-2014.06.08.tar.bz2.asc
-.. _2013.09.15: https://6xq.net/pianobar/pianobar-2013.09.15.tar.bz2
-__ https://6xq.net/pianobar/pianobar-2013.09.15.tar.bz2.sha256
-__ https://6xq.net/pianobar/pianobar-2013.09.15.tar.bz2.asc
-.. _2013.05.19: https://6xq.net/pianobar/pianobar-2013.05.19.tar.bz2
-__ https://6xq.net/pianobar/pianobar-2013.05.19.tar.bz2.sha256
-__ https://6xq.net/pianobar/pianobar-2013.05.19.tar.bz2.asc
-.. _2012.12.01: https://6xq.net/pianobar/pianobar-2012.12.01.tar.bz2
-__ https://6xq.net/pianobar/pianobar-2012.12.01.tar.bz2.sha256
-__ https://6xq.net/pianobar/pianobar-2012.12.01.tar.bz2.asc
-.. _2012.09.07: https://6xq.net/pianobar/pianobar-2012.09.07.tar.bz2
-__ https://6xq.net/pianobar/pianobar-2012.09.07.tar.bz2.sha256
-__ https://6xq.net/pianobar/pianobar-2012.09.07.tar.bz2.asc
-.. _2012.06.24: https://6xq.net/pianobar/pianobar-2012.06.24.tar.bz2
-__ https://6xq.net/pianobar/pianobar-2012.06.24.tar.bz2.sha256
-__ https://6xq.net/pianobar/pianobar-2012.06.24.tar.bz2.asc
-.. _2012.05.06: https://6xq.net/pianobar/pianobar-2012.05.06.tar.bz2
-__ https://6xq.net/pianobar/pianobar-2012.05.06.tar.bz2.sha256
-__ https://6xq.net/pianobar/pianobar-2012.05.06.tar.bz2.asc
-.. _2012.04.24: https://6xq.net/pianobar/pianobar-2012.04.24.tar.bz2
-__ https://6xq.net/pianobar/pianobar-2012.04.24.tar.bz2.sha256
-__ https://6xq.net/pianobar/pianobar-2012.04.24.tar.bz2.asc
-.. _2012.01.10: https://6xq.net/pianobar/pianobar-2012.01.10.tar.bz2
-__ https://6xq.net/pianobar/pianobar-2012.01.10.tar.bz2.sha256
-__ https://6xq.net/pianobar/pianobar-2012.01.10.tar.bz2.asc
-.. _2011.12.11: https://6xq.net/pianobar/pianobar-2011.12.11.tar.bz2
-__ https://6xq.net/pianobar/pianobar-2011.12.11.tar.bz2.sha256
-__ https://6xq.net/pianobar/pianobar-2011.12.11.tar.bz2.asc
-.. _2011.11.11: https://6xq.net/pianobar/pianobar-2011.11.11.tar.bz2
-__ https://6xq.net/pianobar/pianobar-2011.11.11.tar.bz2.sha256
-__ https://6xq.net/pianobar/pianobar-2011.11.11.tar.bz2.asc
-.. _2011.11.09: https://6xq.net/pianobar/pianobar-2011.11.09.tar.bz2
-__ https://6xq.net/pianobar/pianobar-2011.11.09.tar.bz2.sha256
-__ https://6xq.net/pianobar/pianobar-2011.11.09.tar.bz2.asc
-.. _2011.09.22: https://6xq.net/pianobar/pianobar-2011.09.22.tar.bz2
-__ https://6xq.net/pianobar/pianobar-2011.09.22.tar.bz2.sha256
-__ https://6xq.net/pianobar/pianobar-2011.09.22.tar.bz2.asc
-.. _2011.07.09: https://6xq.net/pianobar/pianobar-2011.07.09.tar.bz2
-__ https://6xq.net/pianobar/pianobar-2011.07.09.tar.bz2.sha256
-__ https://6xq.net/pianobar/pianobar-2011.07.09.tar.bz2.asc
-.. _2011.04.27: https://6xq.net/pianobar/pianobar-2011.04.27.tar.bz2
-__ https://6xq.net/pianobar/pianobar-2011.04.27.tar.bz2.sha256
-__ https://6xq.net/pianobar/pianobar-2011.04.27.tar.bz2.asc
-.. _2011.04.10: https://6xq.net/pianobar/pianobar-2011.04.10.tar.bz2
-__ https://6xq.net/pianobar/pianobar-2011.04.10.tar.bz2.sha256
-__ https://6xq.net/pianobar/pianobar-2011.04.10.tar.bz2.asc
-.. _2011.01.24: https://6xq.net/pianobar/pianobar-2011.01.24.tar.bz2
-__ https://6xq.net/pianobar/pianobar-2011.01.24.tar.bz2.sha256
-.. _2010.11.06: https://6xq.net/pianobar/pianobar-2010.11.06.tar.bz2
-__ https://6xq.net/pianobar/pianobar-2010.11.06.tar.bz2.sha1
-.. _2010.10.07: https://6xq.net/pianobar/pianobar-2010.10.07.tar.bz2
-__ https://6xq.net/pianobar/pianobar-2010.10.07.tar.bz2.sha1
-.. _2010.08.21: https://6xq.net/pianobar/pianobar-2010.08.21.tar.bz2
-__ https://6xq.net/pianobar/pianobar-2010.08.21.tar.bz2.sha1
+The GUI is a SwiftUI app (``ios/PianoApp``); the C core is compiled into the
+app unchanged via the glue layer (``ios/Glue``).
 
 Install
 -------
 
-You need the following software to build pianobar:
+The easiest way to get the app is the prebuilt build CI publishes:
 
-- GNU make
-- pthreads
-- libao
-- libcurl ≥ 7.32.0
-- gcrypt [1]_
-- json-c
-- ffmpeg ≤ 5.1 [2]_
-- UTF-8 console/locale
+- CI builds an unsigned ``.ipa`` and publishes it as a GitHub **release** asset
+  (``ios-latest``), refreshed on every push to ``master``. Tagged builds are
+  published under their tag name.
+- Download the ``.ipa`` (it arrives as the bare file, not a zip), then
+  re-sign it with your own Apple credentials to install — e.g. with
+  Sideloadly, AltStore, or an ad-hoc provisioning profile.
 
-.. [1] with blowfish cipher enabled
-.. [2] required: demuxer mov, decoder aac, protocol http and filters volume,
-        aformat, aresample
+Building from source (macOS + Xcode + `xcodegen`_)
+-------------------------------------------------
 
-Then type::
-
-	gmake clean && gmake
-
-You can run the client directly from the source directory now::
-
-	./pianobar
-
-Or install it to ``/usr/local`` by issuing::
-
-	gmake install
-
-iOS App (this fork)
--------------------
-
-This fork contains an iOS port in ``ios/``. It reuses the unmodified
-C core (``src/libpiano``) together with small shims that replace the
-Linux-only dependencies (gcrypt → CommonCrypto Blowfish, libcurl →
-URLSession, json-c → JSONSerialization). The GUI is a deliberately
-simple single-screen SwiftUI app: no pictures, all controls on one
-screen, and a text field with the keyboard whenever the backend asks
-for input.
-
-Local development (macOS with Xcode + `xcodegen`_)::
+::
 
 	cd ios
 	brew install xcodegen
@@ -226,69 +88,3 @@ and additionally produces an unsigned ``.ipa`` published as a GitHub
 e.g. via Sideloadly, AltStore, or an ad-hoc provisioning profile.
 
 .. _xcodegen: https://github.com/yonaskolb/XcodeGen
-
-FAQ
----
-
-The audio output does not work as expected. What can I do?
-    pianobar uses libao and most problems are related to a broken libao
-    configuration. Have a look at issue `#167`_ for example.
-Can I donate money? Do you have a Flattr/Bitcoin/… account?
-    No, money is not necessary to continue working on pianobar. There are many
-    other ways to support pianobar: Reporting bugs, creating `cool stuff`_
-    based on pianobar, blogging about it and the most important one: Keeping
-    Pandora alive.
-
-.. _#167: https://github.com/PromyLOPh/pianobar/issues/167
-.. _cool stuff: `addons`_
-
-External projects
------------------
-
-Addons
-++++++
-
-control-pianobar_
-    Scripts that interact with pianobar entirely through notification bubbles
-    and hotkeys
-pianobar.el_
-    Emacs interface for pianobar
-`pianobar-mediaplayer2`_
-    Control pianobar like any other media player through DBUS/MPRIS.
-PianobarNowPlayable_
-    Integrate pianobar with the Now Playing feature of macOS
-
-.. _control-pianobar: http://malabarba.github.io/control-pianobar/
-.. _pianobar.el: https://github.com/agrif/pianobar.el
-.. _pianobar-mediaplayer2: https://github.com/ryanswilson59/pianobar-mediaplayer2
-.. _PianobarNowPlayable: https://github.com/iDom818/PianobarNowPlayable
-
-Clients
-+++++++
-
-pithos_
-	Python/GTK desktop client
-pianod_
-    Pandora UNIX daemon, based on pianobar
-Hermes_
-    Pandora Client for OS X
-`Remote pianobar`_
-    Fork of pianobar, which includes a HTTP server and serves a
-    Websocket-powered frontend for remote control.
-
-.. _pithos: http://pithos.github.io/
-.. _pianod: http://deviousfish.com/pianod/
-.. _Hermes: http://hermesapp.org/
-.. _Remote pianobar: https://github.com/mr-light-show/remote-pianobar
-
-Standalone devices
-++++++++++++++++++
-
-PandoraBar_
-    Beagleboard-based radio device running pianobar
-`Pandora’s Box`_
-    Raspberry Pi-based standalone devices running pianobar
-
-.. _PandoraBar: https://hackaday.com/2012/09/20/how-to-build-your-own-dedicated-pandora-radio/
-.. _Pandora’s Box: http://www.instructables.com/id/Pandoras-Box-An-Internet-Radio-player-made-with/
-
