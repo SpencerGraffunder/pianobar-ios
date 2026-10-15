@@ -190,7 +190,6 @@ enum SongSaver {
             clientFmt.mSampleRate = 44100   // resample here; output ASBD matches
             clientFmt.mChannelsPerFrame = UInt32(channels)
             clientFmt.mBitsPerChannel = 16
-            clientFmt.mBitsPerFrame = 16 * UInt32(channels)
             clientFmt.mBytesPerFrame = 2 * UInt32(channels)
             clientFmt.mFramesPerPacket = 1
             clientFmt.mBytesPerPacket = 2 * UInt32(channels)
@@ -246,13 +245,15 @@ enum SongSaver {
         var dst: ExtAudioFileRef?
         var dstFmt = AudioStreamBasicDescription()
         dstFmt.mFormatID = kAudioFormatMPEG4AAC
-        dstFmt.mFormatFlags = kMPEG4Object_AAC_LC
+        // AAC-LC object type. kMPEG4Object_AAC_LC (MPEG4ObjectID = 2) is not
+        // exported by the iOS AudioToolbox Swift module, so use the literal
+        // value from CoreAudioBaseTypes.h.
+        dstFmt.mFormatFlags = 2
         dstFmt.mSampleRate = 44100
         dstFmt.mChannelsPerFrame = UInt32(ch)
         dstFmt.mBytesPerFrame = 0
         dstFmt.mFramesPerPacket = 0
         dstFmt.mBytesPerPacket = 0
-        dstFmt.mBitsPerFrame = 0
         dstFmt.mBitsPerChannel = 0
         let status = ExtAudioFileCreateWithURL(
             output as CFURL, kAudioFileM4AType, &dstFmt, nil,
@@ -275,7 +276,6 @@ enum SongSaver {
         clientFmt.mSampleRate = 44100
         clientFmt.mChannelsPerFrame = UInt32(ch)
         clientFmt.mBitsPerChannel = 16
-        clientFmt.mBitsPerFrame = 16 * UInt32(ch)
         clientFmt.mBytesPerFrame = 2 * UInt32(ch)
         clientFmt.mFramesPerPacket = 1
         clientFmt.mBytesPerPacket = 2 * UInt32(ch)
@@ -294,7 +294,7 @@ enum SongSaver {
         while frameIdx < pcm.count / ch {
             let n = min(chunkFrames, pcm.count / ch - frameIdx)
             let slice = pcm[frameIdx * ch..<(frameIdx + n) * ch]
-            let rs = slice.withUnsafeBufferPointer { ptr -> OSStatus in
+            let rs = slice.withUnsafeMutableBufferPointer { ptr -> OSStatus in
                 var abl = AudioBufferList(
                     mNumberBuffers: 1,
                     mBuffers: AudioBuffer(
