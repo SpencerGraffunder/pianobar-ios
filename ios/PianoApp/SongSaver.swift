@@ -208,7 +208,7 @@ enum SongSaver {
             pcm.reserveCapacity(Int(clientFmt.mSampleRate) * 2 * channels)
             var readStatus = noErr
             while readStatus == noErr {
-                let frameBuf = [Int16](
+                var frameBuf = [Int16](
                     repeating: 0, count: chunkFrames * channels)
                 let got = frameBuf.withUnsafeMutableBufferPointer { ptr -> UInt32 in
                     var frames = UInt32(chunkFrames)
@@ -293,7 +293,7 @@ enum SongSaver {
         var frameIdx = 0
         while frameIdx < pcm.count / ch {
             let n = min(chunkFrames, pcm.count / ch - frameIdx)
-            let slice = pcm[frameIdx * ch..<(frameIdx + n) * ch]
+            var slice = pcm[frameIdx * ch..<(frameIdx + n) * ch]
             let rs = slice.withUnsafeMutableBufferPointer { ptr -> OSStatus in
                 var abl = AudioBufferList(
                     mNumberBuffers: 1,
