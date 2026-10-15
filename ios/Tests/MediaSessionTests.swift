@@ -10,6 +10,7 @@
 //
 
 import AVFoundation
+import AudioToolbox
 import Foundation
 import MediaPlayer
 import XCTest
@@ -275,6 +276,67 @@ final class SongSaverTests: XCTestCase {
                        "a-b- c-d-ef")
         XCTAssertEqual(SongSaver.sanitized("  padded  "), "padded")
         XCTAssertTrue(SongSaver.sanitized("   ").isEmpty)
+    }
+
+    /// Generate `seconds` of interleaved int16 PCM (44.1 kHz, `channels`)
+    /// as a left-leaning sine. Returns raw interleaved bytes (no header).
+    private func makePCMData(seconds: Double = 0.5,
+                             channels: Int = 2) -> Data {
+        let sampleRate = 44100
+        let frames = Int(seconds * Double(sampleRate))
+        let bytesPerFrame = 2 * channels
+        var pcm = Data(count: frames * bytesPerFrame)
+        pcm.withUnsafeMutableBytes { (raw: UnsafeMutableRawBufferPointer) in
+            guard let base = raw.bindMemory(to: Int16.self).baseAddress else {
+                return
+            }
+            for i in 0..<frames {
+                let sample = Int16(Float(sin(Double(i) / 441.0 * .pi * 2 * 440))
+                    * 0.5 * Float(Int16.max))
+                for ch in 0..<channels {
+                    base[i * channels + ch] = (ch == 0) ? sample : 0
+                }
+            }
+        }
+        return pcm
+    }
+
+    /// Regression for #40, encode half: `pcmToM4a` (the AAC re-encoder used
+    /// by the raw-stream fallback) must turn raw PCM into a playable .m4a.
+    func testPcmToM4aProducesPlayableM4A() async throws {
+        let pcm = makePCMData(seconds: 0.5, channels: 2)
+        let output = URL.temporaryDirectory
+            .appendingPathComponent("pianobar-pcmm4a-\(UUID().uuidString).m4a")
+        defer { try? FileManager.default.removeItem(at: output) }
+
+        try SongSaver.pcmToM4a(pcm: pcm, channels: 2, output: output)
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: output.path))
+        let asset = AVURLAsset(url: output)
+        let duration = try await asset.load(.duration)
+        XCTAssertGreaterThan(duration.seconds, 0)
+    }
+
+    /// Regression for #40, decode half: `decodeAndEncode` (the fallback that
+    /// replaces the failing export session) must read an input, decode it to
+    /// PCM, and re-encode to a playable .m4a. A contained CAF exercises the
+    /// exact same decode→PCM→AAC code path the raw-ADTS stream uses.
+    func testDecodeAndEncodeRoundTripProducesPlayableM4A() async throws {
+        let input = try makeLocalAudioFile(seconds: 0.5)
+        defer { try? FileManager.default.removeItem(at: input) }
+        let output = URL.temporaryDirectory
+            .appendingPathComponent("pianobar-dae-\(UUID().uuidString).m4a")
+        defer { try? FileManager.default.removeItem(at: output) }
+
+        try await SongSaver.decodeAndEncode(input: input, output: output)
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: output.path))
+        let asset = AVURLAsset(url: output)
+        let duration = try await asset.load(.duration)
+        XCTAssertGreaterThan(duration.seconds, 0)
+        let size = try FileManager.default
+            .attributesOfItem(atPath: output.path)[.size] as? Int ?? 0
+        XCTAssertGreaterThan(size, 1000)
     }
 
     /// Offline download test: a `file://` URL through the same
