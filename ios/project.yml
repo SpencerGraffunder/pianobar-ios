@@ -52,6 +52,7 @@ targets:
         OTHER_LDFLAGS:
           - -framework Security
           - -framework AVFoundation
+          - -framework AudioToolbox
         ASSETCATALOG_COMPILER_APPICON_NAME: ""
     scheme:
       testTargets:
@@ -77,3 +78,4 @@ targets:
         OTHER_LDFLAGS:
           - -framework Security
           - -framework AVFoundation
+          - -framework AudioToolbox

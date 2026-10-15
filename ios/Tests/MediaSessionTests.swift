@@ -10,6 +10,7 @@
 //
 
 import AVFoundation
+import AudioToolbox
 import Foundation
 import MediaPlayer
 import XCTest
@@ -366,5 +367,55 @@ final class SongSaverTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: dest) }
 
         XCTAssertEqual(try Data(contentsOf: dest).count, 4096)
+    }
+
+    /// Regression for issue #40 (encode half): `pcmToM4a` — the AAC
+    /// re-encoder used by the raw-stream fallback — must turn raw
+    /// interleaved 16-bit PCM into a playable .m4a.
+    func testPcmToM4aProducesPlayableM4A() async throws {
+        // Build ~0.3s of a 440 Hz sine, interleaved stereo 16-bit, 44.1 kHz.
+        let frames = 0.3 * 44100
+        var pcm = [Int16]()
+        for i in 0..<Int(frames) {
+            let s = sin(Double(i) / 441.0 * .pi * 2 * 440) * 12000
+            pcm.append(Int16(s))
+            pcm.append(0)
+        }
+        let output = URL.temporaryDirectory
+            .appendingPathComponent("pianobar-pcm-out-\(UUID().uuidString).m4a")
+        defer { try? FileManager.default.removeItem(at: output) }
+
+        try await Task.detached(priority: .userInitiated) {
+            try SongSaver.pcmToM4a(pcm: pcm, channels: 2, output: output)
+        }.value
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: output.path))
+        let asset = AVURLAsset(url: output)
+        let duration = try await asset.load(.duration)
+        XCTAssertGreaterThan(duration.seconds, 0.1)
+        let size = try FileManager.default
+            .attributesOfItem(atPath: output.path)[.size] as? Int ?? 0
+        XCTAssertGreaterThan(size, 1000)
+    }
+
+    /// Regression for issue #40 (decode half): `decodeAndEncode` must read a
+    /// source `ExtAudioFile` can open, decode it to PCM, and write a playable
+    /// .m4a — the exact decode → re-encode path the raw Pandora stream uses.
+    func testDecodeAndEncodeProducesPlayableM4A() async throws {
+        let input = try makeLocalAudioFile()
+        defer { try? FileManager.default.removeItem(at: input) }
+        let output = URL.temporaryDirectory
+            .appendingPathComponent("pianobar-decode-out-\(UUID().uuidString).m4a")
+        defer { try? FileManager.default.removeItem(at: output) }
+
+        try await SongSaver.decodeAndEncode(input: input, output: output)
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: output.path))
+        let asset = AVURLAsset(url: output)
+        let duration = try await asset.load(.duration)
+        XCTAssertGreaterThan(duration.seconds, 0.1)
+        let size = try FileManager.default
+            .attributesOfItem(atPath: output.path)[.size] as? Int ?? 0
+        XCTAssertGreaterThan(size, 1000)
     }
 }

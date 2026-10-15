@@ -26,6 +26,7 @@
 //
 
 import AVFoundation
+import AudioToolbox
 import Foundation
 
 enum SongSaver {
@@ -74,9 +75,14 @@ enum SongSaver {
     static func transcode(input: URL, output: URL) async throws {
         let asset = AVURLAsset(url: input)
         guard let track = asset.tracks(withMediaType: .audio).first else {
-            throw NSError(domain: "SongSaver", code: 4,
-                          userInfo: [NSLocalizedDescriptionKey:
-                               "No transcodable audio track"])
+            // Pandora serves a raw, containerless ADTS-AAC stream. AVURLAsset
+            // can't find a track in a file with no MP4 header (issue #40),
+            // so AVAssetReader is a dead end. Fall back to the AudioToolbox
+            // ExtAudioFile path, which decodes the raw stream the same way
+            // AVPlayer does and re-encodes it to a standard .m4a.
+            try? FileManager.default.removeItem(at: output)
+            try await decodeAndEncode(input: input, output: output)
+            return
         }
 
         // Decode the source (HE-AAC / MP3 / AAC / PCM) to a fixed, known
@@ -144,6 +150,165 @@ enum SongSaver {
         guard FileManager.default.fileExists(atPath: output.path) else {
             throw NSError(domain: "SongSaver", code: 2,
                           userInfo: [NSLocalizedDescriptionKey: "No output file"])
+        }
+    }
+
+    /// Fallback transcoder for files `AVURLAsset` can't enumerate a track in —
+    /// most importantly Pandora's raw, containerless ADTS-AAC stream (issue
+    /// #40). Opens the input with AudioToolbox's `ExtAudioFile` (the same
+    /// low-level decoder `AVPlayer` uses for playback), decodes it to
+    /// 16-bit PCM, then re-encodes to AAC via `pcmToM4a`.
+    static func decodeAndEncode(input: URL, output: URL) async throws {
+        try await Task.detached(priority: .userInitiated) {
+            var src: ExtAudioFileRef?
+            var status = ExtAudioFileOpenURL(input as CFURL, &src)
+            guard status == noErr, let src else {
+                throw NSError(domain: "SongSaver", code: 10,
+                    userInfo: [NSLocalizedDescriptionKey:
+                        "Couldn't open input (OSStatus \(status))"])
+            }
+            defer { ExtAudioFileDispose(src) }
+
+            // Read the source's native format so we know the channel count.
+            var srcFmt = AudioStreamBasicDescription()
+            var fmtSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+            status = ExtAudioFileGetProperty(
+                src, kExtAudioFileProperty_FileDataFormat, &fmtSize, &srcFmt)
+            guard status == noErr else {
+                throw NSError(domain: "SongSaver", code: 11,
+                    userInfo: [NSLocalizedDescriptionKey:
+                        "Couldn't read input format (OSStatus \(status))"])
+            }
+            let channels = max(1, Int(srcFmt.mChannelsPerFrame))
+
+            // Decode everything to a fixed 16-bit PCM client format.
+            var clientFmt = AudioStreamBasicDescription()
+            clientFmt.mFormatID = kAudioFormatLinearPCM
+            clientFmt.mFormatFlags = kLinearPCMFormatFlagIsSignedInteger
+                | kAudioFormatFlagsNativeEndian
+                | kLinearPCMFormatFlagIsPacked
+            clientFmt.mSampleRate = 44100   // resample here; output ASBD matches
+            clientFmt.mChannelsPerFrame = UInt32(channels)
+            clientFmt.mBitsPerChannel = 16
+            clientFmt.mBitsPerFrame = 16 * UInt32(channels)
+            clientFmt.mBytesPerFrame = 2 * UInt32(channels)
+            clientFmt.mFramesPerPacket = 1
+            clientFmt.mBytesPerPacket = 2 * UInt32(channels)
+            fmtSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+            status = ExtAudioFileSetProperty(
+                src, kExtAudioFileProperty_ClientDataFormat, fmtSize, &clientFmt)
+            guard status == noErr else {
+                throw NSError(domain: "SongSaver", code: 11,
+                    userInfo: [NSLocalizedDescriptionKey:
+                        "Couldn't set PCM client format (OSStatus \(status))"])
+            }
+
+            // Read the whole stream into one buffer.
+            let chunkFrames = 4096
+            var pcm = [Int16]()
+            pcm.reserveCapacity(Int(clientFmt.mSampleRate) * 2 * channels)
+            var readStatus = noErr
+            while readStatus == noErr {
+                let frameBuf = [Int16](
+                    repeating: 0, count: chunkFrames * channels)
+                let got = frameBuf.withUnsafeMutableBufferPointer { ptr -> UInt32 in
+                    var frames = UInt32(chunkFrames)
+                    var abl = AudioBufferList(
+                        mNumberBuffers: 1,
+                        mBuffers: AudioBuffer(
+                            mNumberChannels: UInt32(channels),
+                            mDataByteSize:
+                                UInt32(chunkFrames * channels * 2),
+                            mData: ptr.baseAddress))
+                    let rs = ExtAudioFileRead(src, &frames, &abl)
+                    if frames == 0 { return 0 }
+                    guard rs == noErr else { return 0 }
+                    return frames
+                }
+                if got == 0 { break }
+                for i in 0..<(Int(got) * channels) {
+                    pcm.append(frameBuf[i])
+                }
+            }
+            guard !pcm.isEmpty else {
+                throw NSError(domain: "SongSaver", code: 13,
+                    userInfo: [NSLocalizedDescriptionKey:
+                        "Input had no audio to decode"])
+            }
+            try pcmToM4a(pcm: pcm, channels: channels, output: output)
+        }.value
+    }
+
+    /// Re-encode raw interleaved 16-bit PCM to AAC in an `.m4a` container via
+    /// `ExtAudioFile`. Pure file I/O; testable offline.
+    static func pcmToM4a(pcm: [Int16], channels: Int, output: URL) throws {
+        let ch = max(1, channels)
+        var dst: ExtAudioFileRef?
+        var dstFmt = AudioStreamBasicDescription()
+        dstFmt.mFormatID = kAudioFormatMPEG4AAC
+        dstFmt.mFormatFlags = kMPEG4Object_AAC_LC
+        dstFmt.mSampleRate = 44100
+        dstFmt.mChannelsPerFrame = UInt32(ch)
+        dstFmt.mBytesPerFrame = 0
+        dstFmt.mFramesPerPacket = 0
+        dstFmt.mBytesPerPacket = 0
+        dstFmt.mBitsPerFrame = 0
+        dstFmt.mBitsPerChannel = 0
+        let status = ExtAudioFileCreateWithURL(
+            output as CFURL, kAudioFileM4AType, &dstFmt, nil,
+            AudioFileFlags.eraseFile.rawValue, &dst)
+        guard status == noErr, let dst else {
+            throw NSError(domain: "SongSaver", code: 12,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "Couldn't create .m4a output (OSStatus \(status))"])
+        }
+        defer { ExtAudioFileDispose(dst) }
+
+        // The file format is AAC (dstFmt), but what we feed in is PCM —
+        // declare the client (input) format as interleaved 16-bit PCM so
+        // ExtAudioFileWrite encodes it to AAC.
+        var clientFmt = AudioStreamBasicDescription()
+        clientFmt.mFormatID = kAudioFormatLinearPCM
+        clientFmt.mFormatFlags = kLinearPCMFormatFlagIsSignedInteger
+            | kAudioFormatFlagsNativeEndian
+            | kLinearPCMFormatFlagIsPacked
+        clientFmt.mSampleRate = 44100
+        clientFmt.mChannelsPerFrame = UInt32(ch)
+        clientFmt.mBitsPerChannel = 16
+        clientFmt.mBitsPerFrame = 16 * UInt32(ch)
+        clientFmt.mBytesPerFrame = 2 * UInt32(ch)
+        clientFmt.mFramesPerPacket = 1
+        clientFmt.mBytesPerPacket = 2 * UInt32(ch)
+        var cfSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        let cStatus = ExtAudioFileSetProperty(
+            dst, kExtAudioFileProperty_ClientDataFormat, cfSize, &clientFmt)
+        guard cStatus == noErr else {
+            throw NSError(domain: "SongSaver", code: 12,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "Couldn't set PCM client format (OSStatus \(cStatus))"])
+        }
+
+        // Feed the PCM through the writer in interleaved 16-bit chunks.
+        let chunkFrames = 4096
+        var frameIdx = 0
+        while frameIdx < pcm.count / ch {
+            let n = min(chunkFrames, pcm.count / ch - frameIdx)
+            let slice = pcm[frameIdx * ch..<(frameIdx + n) * ch]
+            let rs = slice.withUnsafeBufferPointer { ptr -> OSStatus in
+                var abl = AudioBufferList(
+                    mNumberBuffers: 1,
+                    mBuffers: AudioBuffer(
+                        mNumberChannels: UInt32(ch),
+                        mDataByteSize: UInt32(n * ch * 2),
+                        mData: ptr.baseAddress))
+                return ExtAudioFileWrite(dst, UInt32(n), &abl)
+            }
+            if rs != noErr {
+                throw NSError(domain: "SongSaver", code: 14,
+                    userInfo: [NSLocalizedDescriptionKey:
+                        "Failed writing .m4a (OSStatus \(rs))"])
+            }
+            frameIdx += n
         }
     }
 
