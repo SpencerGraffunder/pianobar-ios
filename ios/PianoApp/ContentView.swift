@@ -839,6 +839,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 14) {
                 stationBar
                 currentSongCard
+                songMetaLine
                 controlGrid
                 if model.showUpcoming {
                     upcomingList
@@ -947,6 +948,45 @@ struct ContentView: View {
     /// One invisible placeholder line used to reserve card height.
     private func reservedLine(_ font: Font) -> some View {
         Text("Ag").font(font).lineLimit(1)
+    }
+
+    /// Terminal-style position line under the song card: elapsed / duration
+    /// on the left, current playback speed on the right. Lives outside the
+    /// card (the card's height is fixed, issue #38) in its own little box;
+    /// it pushes the controls down a bit instead. TimelineView refreshes
+    /// the elapsed time every second.
+    private var songMetaLine: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { _ in
+            HStack {
+                Text(locationText)
+                Spacer()
+                Text(String(format: "%.2fx", model.player.playbackSpeed))
+            }
+            .font(.footnote.monospacedDigit())
+            .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .frame(maxWidth: .infinity)
+        .background(Color(.secondarySystemBackground),
+                    in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    /// "m:ss / m:ss" like the terminal UI; falls back to just the elapsed
+    /// time while the duration is still unknown.
+    private var locationText: String {
+        let elapsed = model.player.elapsed
+        let duration = model.player.duration > 0
+            ? model.player.duration
+            : Double(model.currentSong?.length ?? 0)
+        return duration > 0
+            ? "\(Self.formatTime(elapsed)) / \(Self.formatTime(duration))"
+            : Self.formatTime(elapsed)
+    }
+
+    private static func formatTime(_ t: Double) -> String {
+        guard t.isFinite, t >= 0 else { return "0:00" }
+        return String(format: "%d:%02d", Int(t) / 60, Int(t) % 60)
     }
 
     private var controlGrid: some View {
