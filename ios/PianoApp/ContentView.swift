@@ -849,26 +849,59 @@ struct ContentView: View {
         }
     }
 
-    @ViewBuilder
+    /// The now-playing card. Issue #38: the card must NEVER change height —
+    /// a long song/artist/album name used to wrap onto a new line and push
+    /// the whole layout down. Two lines are reserved for each field via
+    /// invisible placeholder text (so the reserved height tracks Dynamic
+    /// Type instead of a hard-coded constant), and every visible line is
+    /// capped at 2 lines with a trailing ellipsis. The empty state uses the
+    /// same reservation so the first song can't shift anything either.
     private var currentSongCard: some View {
-        if let song = model.currentSong {
+        ZStack(alignment: .topLeading) {
+            // Invisible 2-line-per-field placeholders size the card to its
+            // maximum; real content can only ever be shorter.
             VStack(alignment: .leading, spacing: 3) {
-                Text(song.title ?? "(untitled)").font(.headline)
-                Text(song.artist ?? "").font(.subheadline)
-                    .foregroundStyle(.secondary)
-                if let album = song.album {
-                    Text(album).font(.caption).foregroundStyle(.tertiary)
-                }
+                reservedLine(.headline)
+                reservedLine(.headline)
+                reservedLine(.subheadline)
+                reservedLine(.subheadline)
+                reservedLine(.caption)
+                reservedLine(.caption)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(10)
-            .background(Color(.secondarySystemBackground),
-                        in: RoundedRectangle(cornerRadius: 10))
-        } else {
-            Text("No song yet — tap Next.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+            .opacity(0)
+            .accessibilityHidden(true)
+
+            if let song = model.currentSong {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(song.title ?? "(untitled)")
+                        .font(.headline)
+                        .lineLimit(2)
+                    Text(song.artist ?? "")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                    if let album = song.album {
+                        Text(album)
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(2)
+                    }
+                }
+            } else {
+                Text("No song yet — tap Next.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(Color(.secondarySystemBackground),
+                    in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    /// One invisible placeholder line used to reserve card height.
+    private func reservedLine(_ font: Font) -> some View {
+        Text("Ag").font(font).lineLimit(1)
     }
 
     private var controlGrid: some View {
