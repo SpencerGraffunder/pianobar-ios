@@ -1255,8 +1255,6 @@ struct HelpSheet: View {
                   detail: "Starts or pauses the current song; if nothing is queued it fetches the next song from your station first."),
         HelpEntry(id: "next", title: "Next", systemImage: "forward.fill",
                   detail: "Skips ahead and starts the next song from the selected station."),
-        HelpEntry(id: "stop", title: "Stop", systemImage: "stop.fill",
-                  detail: "Stops playback and clears the queue."),
         HelpEntry(id: "device", title: "Device", systemImage: "hifispeaker",
                   detail: "Opens the system picker to choose where audio plays (speaker, headphones, Bluetooth, AirPlay)."),
         HelpEntry(id: "refresh", title: "Refresh", systemImage: "arrow.clockwise",
