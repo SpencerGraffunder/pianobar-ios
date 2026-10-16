@@ -28,6 +28,31 @@ final class Player: ObservableObject {
     private var statusObservation: NSKeyValueObservation?
     private var endObserver: NSObjectProtocol?
 
+    // MARK: Next-song prefetch (issue #39)
+
+    /// The one song in the future we keep downloaded ("only 1", per the
+    /// issue): its remote URL and the local file it was saved to.
+    private var prefetched: (remote: URL, local: URL)?
+    /// Remote URL of the download currently in flight (nil if none).
+    private var prefetchingURL: URL?
+    private var prefetchTask: URLSessionDownloadTask?
+    /// Session for the prefetch download. Ephemeral: nothing should be
+    /// cached on disk beyond the single song file itself.
+    private lazy var prefetchSession: URLSession = {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: cfg)
+    }()
+
+    /// Directory for the prefetched song file (Caches — iOS may purge it,
+    /// which is fine: a missing file just falls back to streaming).
+    private var prefetchDir: URL {
+        let caches = FileManager.default.urls(for: .cachesDirectory,
+                                             in: .userDomainMask)[0]
+        return caches.appendingPathComponent("NextSongPrefetch",
+                                             isDirectory: true)
+    }
+
     /// Invoked on the main thread when the current item finishes playing
     /// naturally (end of stream). The owning model (AppModel) sets this to
     /// fetch and start the next song (issue #16). Nil if no one is watching.
@@ -37,6 +62,9 @@ final class Player: ObservableObject {
         try? AVAudioSession.sharedInstance()
             .setCategory(.playback, mode: .default)
         try? AVAudioSession.sharedInstance().setActive(true)
+        // Prefetched files are only useful within a session; drop any
+        // leftovers from a previous launch.
+        try? FileManager.default.removeItem(at: prefetchDir)
     }
 
     deinit {
@@ -73,11 +101,16 @@ final class Player: ObservableObject {
     }
 
     func play(url: URL) {
+        // Use the prefetched download when we have one for this URL
+        // (issue #39): no network round trip, the song starts instantly.
+        // Must run before stop(), which tears the prefetch down with the
+        // rest of the player state.
+        let source = consumePrefetch(for: url) ?? url
         stop()
         try? AVAudioSession.sharedInstance()
             .setCategory(.playback, mode: .moviePlayback)
         try? AVAudioSession.sharedInstance().setActive(true)
-        let item = AVPlayerItem(url: url)
+        let item = AVPlayerItem(url: source)
         let newPlayer = AVPlayer(playerItem: item)
         newPlayer.volume = volume
         player = newPlayer
@@ -102,10 +135,76 @@ final class Player: ObservableObject {
             self.endObserver = nil
         }
         isPlaying = false
+        // Whatever was queued in the future is no longer wanted (new song
+        // starting, station switch, logout) — drop the download and file.
+        cancelPrefetch()
         // Release the audio session so other apps can play (the
         // system re-activates it on the next play()).
         try? AVAudioSession.sharedInstance().setActive(false,
             options: .notifyOthersOnDeactivation)
+    }
+
+    // MARK: Prefetch
+
+    /// Download the next song's audio in the background so that switching
+    /// to it is instant even on a bad network (issue #39). Only one song
+    /// is kept ahead: a new prefetch replaces the previous one. Failures
+    /// are silent — play(url:) falls back to streaming the remote URL.
+    func prefetch(url: URL) {
+        // Already have this song (downloaded or downloading) — nothing to do.
+        guard prefetched?.remote != url, prefetchingURL != url else { return }
+        cancelPrefetch()
+        let dir = prefetchDir
+        try? FileManager.default.createDirectory(at: dir,
+                                                withIntermediateDirectories: true)
+        let dest = dir.appendingPathComponent(UUID().uuidString)
+        prefetchingURL = url
+        let task = prefetchSession.downloadTask(with: url) {
+            [weak self] tempURL, response, error in
+            DispatchQueue.main.async {
+                guard let self, self.prefetchingURL == url else { return }
+                self.prefetchingURL = nil
+                self.prefetchTask = nil
+                guard error == nil, let tempURL else { return }
+                if let http = response as? HTTPURLResponse,
+                   http.statusCode != 200 {
+                    try? FileManager.default.removeItem(at: tempURL)
+                    return
+                }
+                do {
+                    try FileManager.default.moveItem(at: tempURL, to: dest)
+                } catch {
+                    try? FileManager.default.removeItem(at: tempURL)
+                    return
+                }
+                self.prefetched = (remote: url, local: dest)
+            }
+        }
+        prefetchTask = task
+        task.resume()
+    }
+
+    /// Drop the current prefetch (if any): cancel an in-flight download
+    /// and delete the downloaded file.
+    func cancelPrefetch() {
+        prefetchTask?.cancel()
+        prefetchTask = nil
+        prefetchingURL = nil
+        if let p = prefetched {
+            try? FileManager.default.removeItem(at: p.local)
+        }
+        prefetched = nil
+    }
+
+    /// If `url` matches the prefetched song, hand back its local file URL
+    /// (clearing the entry — the file is now the playing item). Otherwise
+    /// nil: play from the network as before.
+    private func consumePrefetch(for url: URL) -> URL? {
+        guard let p = prefetched, p.remote == url,
+              FileManager.default.fileExists(atPath: p.local.path)
+        else { return nil }
+        prefetched = nil
+        return p.local
     }
 
     // MARK: Now Playing support
