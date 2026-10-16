@@ -142,6 +142,7 @@ final class AppModel: ObservableObject, MediaSessionModel {
         } else if let url = currentSong?.audioUrl, let u = URL(string: url) {
             player.play(url: u)
             updateNowPlaying()
+            prefetchNextSong()
         }
     }
 
@@ -301,9 +302,24 @@ final class AppModel: ObservableObject, MediaSessionModel {
             }
             player.play(url: u)
             updateNowPlaying()
+            // While this one plays, get a head start on the next (issue
+            // #39): on a bad network the switch is then instant instead
+            // of waiting for the download.
+            prefetchNextSong()
         } else if currentSong != nil {
             status = "This song has no audio URL."
         }
+    }
+
+    /// Start downloading the next song's audio now so tapping Next (or the
+    /// current song ending) doesn't wait on a fresh download (issue #39).
+    /// The Player keeps exactly one song ahead; silently skipped when the
+    /// upcoming song has no audio URL.
+    private func prefetchNextSong() {
+        guard let next = upcoming.first,
+              let urlString = next.audioUrl,
+              let url = URL(string: urlString) else { return }
+        player.prefetch(url: url)
     }
 
     /// Start (or restart) a song on the currently selected station. Used
@@ -343,6 +359,19 @@ final class AppModel: ObservableObject, MediaSessionModel {
             status = "Pick a station first."
             return
         }
+        // Songs a previous getPlaylist already returned are still valid to
+        // play: advance to the queue's tail instead of re-fetching. This
+        // costs no round trip, and the next song's audio is already
+        // downloading/downloading (issue #39) — the whole point of the
+        // prefetch would be lost if Next always fetched a fresh playlist
+        // with different songs. A fresh playlist is fetched only once the
+        // tail is empty.
+        if !upcoming.isEmpty {
+            playlist.removeFirst()
+            showUpcoming = false
+            playIfAvailable()
+            return
+        }
         run("Next song") { [weak self] in
             guard let self else { return }
             let songs = try await client.getPlaylist(station: station)
@@ -365,6 +394,7 @@ final class AppModel: ObservableObject, MediaSessionModel {
         } else if let url = currentSong?.audioUrl, let u = URL(string: url) {
             player.play(url: u)
             updateNowPlaying()
+            prefetchNextSong()
         } else {
             // No playable song yet (empty queue, or the current song has no
             // audio URL) — fetch the next song from the station and start it.
