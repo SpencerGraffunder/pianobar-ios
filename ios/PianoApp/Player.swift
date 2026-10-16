@@ -13,6 +13,7 @@
 import AVFoundation
 import Combine
 import Foundation
+import UniformTypeIdentifiers
 
 /// Minimal AVPlayer wrapper with a small observable state.
 final class Player: ObservableObject {
@@ -35,6 +36,10 @@ final class Player: ObservableObject {
     private var prefetched: (remote: URL, local: URL)?
     /// Remote URL of the download currently in flight (nil if none).
     private var prefetchingURL: URL?
+    /// When the playing item came from a prefetched local file, its file
+    /// URL plus the remote one — a failed open falls back to streaming
+    /// (issue #49).
+    private var prefetchFallback: (local: URL, remote: URL)?
     private var prefetchTask: URLSessionDownloadTask?
     /// Session for the prefetch download. Ephemeral: nothing should be
     /// cached on disk beyond the single song file itself.
@@ -82,6 +87,16 @@ final class Player: ObservableObject {
             [weak self] it, _ in
             guard let self else { return }
             if it.status == .failed {
+                // A prefetched download that won't open locally is retried
+                // once straight from the network before giving up (issue
+                // #49) — the download itself may be subtly broken even
+                // though the URL streams fine.
+                if let fb = self.prefetchFallback,
+                   (it.asset as? AVURLAsset)?.url == fb.local {
+                    self.prefetchFallback = nil
+                    self.play(url: fb.remote)
+                    return
+                }
                 let err = it.error
                 self.lastError = "Playback failed: " +
                     (err?.localizedDescription ?? "unknown error")
@@ -105,7 +120,15 @@ final class Player: ObservableObject {
         // (issue #39): no network round trip, the song starts instantly.
         // Must run before stop(), which tears the prefetch down with the
         // rest of the player state.
-        let source = consumePrefetch(for: url) ?? url
+        var source = url
+        if let local = consumePrefetch(for: url) {
+            source = local
+            // Remember the remote URL so a failed open can fall back to
+            // streaming (issue #49).
+            prefetchFallback = (local: local, remote: url)
+        } else {
+            prefetchFallback = nil
+        }
         stop()
         try? AVAudioSession.sharedInstance()
             .setCategory(.playback, mode: .moviePlayback)
@@ -157,7 +180,6 @@ final class Player: ObservableObject {
         let dir = prefetchDir
         try? FileManager.default.createDirectory(at: dir,
                                                 withIntermediateDirectories: true)
-        let dest = dir.appendingPathComponent(UUID().uuidString)
         prefetchingURL = url
         let task = prefetchSession.downloadTask(with: url) {
             [weak self] tempURL, response, error in
@@ -171,6 +193,21 @@ final class Player: ObservableObject {
                     try? FileManager.default.removeItem(at: tempURL)
                     return
                 }
+                // The destination name must carry a media file extension:
+                // AVURLAsset picks the format from the extension for local
+                // files, and an extensionless name fails to open ("Cannot
+                // open", issue #49). Derive it from the remote URL, falling
+                // back to the response's content type; without either,
+                // skip the prefetch and let play(url:) stream instead.
+                guard let ext = Self.mediaExtension(
+                        for: url,
+                        mimeType: (response as? HTTPURLResponse)?.mimeType)
+                else {
+                    try? FileManager.default.removeItem(at: tempURL)
+                    return
+                }
+                let dest = dir.appendingPathComponent(
+                    UUID().uuidString + "." + ext)
                 do {
                     try FileManager.default.moveItem(at: tempURL, to: dest)
                 } catch {
@@ -182,6 +219,22 @@ final class Player: ObservableObject {
         }
         prefetchTask = task
         task.resume()
+    }
+
+    /// File extension for a prefetched download: the remote URL's own
+    /// extension, else one derived from the response's MIME type. Nil when
+    /// neither yields one — an extensionless local file can't be opened by
+    /// AVPlayer (issue #49), so the prefetch is better skipped.
+    private static func mediaExtension(for url: URL,
+                                       mimeType: String?) -> String? {
+        let ext = url.pathExtension
+        if !ext.isEmpty { return ext }
+        if let mime = mimeType,
+           let uttype = UTType(mimeType: mime),
+           let preferred = uttype.preferredFilenameExtension {
+            return preferred
+        }
+        return nil
     }
 
     /// Drop the current prefetch (if any): cancel an in-flight download
