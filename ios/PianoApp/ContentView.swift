@@ -468,6 +468,21 @@ final class AppModel: ObservableObject, MediaSessionModel {
         }
     }
 
+    // MARK: Playback speed (Windows parity: 0.5x-2.0x in 0.25 steps)
+
+    func speedDown() {
+        setPlaybackSpeed(player.playbackSpeed - Player.speedStep)
+    }
+
+    func speedUp() {
+        setPlaybackSpeed(player.playbackSpeed + Player.speedStep)
+    }
+
+    private func setPlaybackSpeed(_ v: Float) {
+        player.setPlaybackSpeed(v)
+        status = String(format: "Playback speed: %.2fx", player.playbackSpeed)
+    }
+
     // MARK: Song info
 
     func explainSong() {
@@ -982,6 +997,10 @@ struct ContentView: View {
             .init(id: "device", title: "Device", systemImage: "hifispeaker",
                   role: .normal, enabled: true, isDevicePicker: true,
                   action: {}),
+            .init(id: "speeddown", title: "Slower", systemImage: "tortoise.fill",
+                  role: .normal, enabled: true, action: model.speedDown),
+            .init(id: "speedup", title: "Faster", systemImage: "hare.fill",
+                  role: .normal, enabled: true, action: model.speedUp),
             .init(id: "help", title: "Help", systemImage: "questionmark.circle",
                   role: .normal, enabled: true,
                   action: { model.showHelp = true }),
@@ -1320,6 +1339,10 @@ struct HelpSheet: View {
                   detail: "Skips ahead and starts the next song from the selected station."),
         HelpEntry(id: "device", title: "Device", systemImage: "hifispeaker",
                   detail: "Opens the system picker to choose where audio plays (speaker, headphones, Bluetooth, AirPlay)."),
+        HelpEntry(id: "speeddown", title: "Slower", systemImage: "tortoise.fill",
+                  detail: "Plays the music slower, in 0.25x steps down to 0.5x."),
+        HelpEntry(id: "speedup", title: "Faster", systemImage: "hare.fill",
+                  detail: "Plays the music faster, in 0.25x steps up to 2.0x. The speed is remembered between launches."),
         HelpEntry(id: "refresh", title: "Refresh", systemImage: "arrow.clockwise",
                   detail: "Re-loads your station list from your Pandora account (top-right toolbar)."),
         HelpEntry(id: "logout", title: "Log out", systemImage: "rectangle.portrait.and.arrow.right",

@@ -25,6 +25,18 @@ final class Player: ObservableObject {
     @Published private(set) var itemFinished = false
     @Published var volume: Float = 0.8
 
+    // MARK: Playback speed (matches the Windows build's playback_speed:
+    // 0.5x-2.0x in 0.25 steps, default 1.0x, persisted across launches)
+
+    static let speedMin: Float = 0.5
+    static let speedMax: Float = 2.0
+    static let speedStep: Float = 0.25
+    private static let speedKey = "playbackSpeed"
+
+    /// Current rate multiplier. AVPlayer plays audio at 0.5x-2.0x with
+    /// pitch correction, which is exactly the Windows build's range.
+    private(set) var playbackSpeed: Float
+
     private var player: AVPlayer?
     private var statusObservation: NSKeyValueObservation?
     private var endObserver: NSObjectProtocol?
@@ -64,6 +76,11 @@ final class Player: ObservableObject {
     var onSongFinished: (() -> Void)?
 
     init() {
+        // Restore the saved playback speed (Windows parity: playback_speed
+        // in the config). Clamp in case the stored value is out of range.
+        let saved = UserDefaults.standard.object(forKey: Self.speedKey)
+            as? Float ?? 1.0
+        playbackSpeed = min(max(saved, Self.speedMin), Self.speedMax)
         try? AVAudioSession.sharedInstance()
             .setCategory(.playback, mode: .default)
         try? AVAudioSession.sharedInstance().setActive(true)
@@ -141,6 +158,10 @@ final class Player: ObservableObject {
         lastError = nil
         itemFinished = false
         newPlayer.play()
+        if playbackSpeed != 1.0 {
+            // AVPlayer.play() always starts at 1.0; re-apply the speed.
+            newPlayer.rate = playbackSpeed
+        }
         isPlaying = true
     }
 
@@ -297,6 +318,9 @@ final class Player: ObservableObject {
         guard let player else { return }
         try? AVAudioSession.sharedInstance().setActive(true)
         player.play()
+        if playbackSpeed != 1.0 {
+            player.rate = playbackSpeed
+        }
         isPlaying = true
     }
 
@@ -314,6 +338,20 @@ final class Player: ObservableObject {
 
     func nudgeVolume(_ delta: Float) {
         setVolume(volume + delta)
+    }
+
+    // MARK: Playback speed
+
+    /// Set the rate multiplier (clamped to 0.5x-2.0x like the Windows
+    /// build), persist it, and apply it to the player if something is
+    /// loaded. Only applied while actually playing — setting `rate` on a
+    /// paused AVPlayer *starts* it, which would surprise a paused user.
+    func setPlaybackSpeed(_ v: Float) {
+        playbackSpeed = min(max(v, Self.speedMin), Self.speedMax)
+        UserDefaults.standard.set(playbackSpeed, forKey: Self.speedKey)
+        if let player, isPlaying {
+            player.rate = playbackSpeed
+        }
     }
 
     func resetVolume() {
