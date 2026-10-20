@@ -860,6 +860,14 @@ struct ContentView: View {
         }
         .sheet(item: $model.shareItem) { ShareSheet(url: $0.url) }
         .toolbar {
+            // Help lives in the top-left toolbar (was a grid tile) and uses
+            // the same plain icon-button style as the sign-out button on the
+            // right.
+            ToolbarItem(placement: .topBarLeading) {
+                Button { model.showHelp = true } label: {
+                    Image(systemName: "questionmark.circle")
+                }
+            }
             ToolbarItemGroup(placement: .topBarTrailing) {
                 Button { model.refreshStations() } label: {
                     Image(systemName: "arrow.clockwise")
@@ -995,7 +1003,8 @@ struct ContentView: View {
         let hasUpcoming = model.upcoming.count > 0
         let controls: [Control] = [
             // Order per issue #41: Delete/Rename/Select Stations, Explain/
-            // Upcoming/Add Music, Ban/Love/Tired, Save/Play/Next, Device/Help.
+            // Upcoming/Add Music, Ban/Love/Tired, Save/Play/Next,
+            // Device/Slower/Faster. (Help moved to the top-left toolbar.)
             .init(id: "delete", title: "Delete Station", systemImage: "trash",
                   role: .normal, enabled: hasStation,
                   action: { model.confirmDelete = true }),
@@ -1041,9 +1050,6 @@ struct ContentView: View {
                   role: .normal, enabled: true, action: model.speedDown),
             .init(id: "speedup", title: "Faster", systemImage: "hare.fill",
                   role: .normal, enabled: true, action: model.speedUp),
-            .init(id: "help", title: "Help", systemImage: "questionmark.circle",
-                  role: .normal, enabled: true,
-                  action: { model.showHelp = true }),
         ]
 
         return LazyVGrid(columns: columns, spacing: 10) {
