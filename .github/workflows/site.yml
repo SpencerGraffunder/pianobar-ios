@@ -9,24 +9,28 @@
 # BARE .ipa file (Actions run artifacts are always zip-wrapped and are not
 # linked here on purpose).
 #
-# Auto-refresh triggers:
-#   release            — any release published in THIS repo (instant)
-#   repository_dispatch (site-refresh) — for cross-repo pokes; requires a
-#                        secret since GITHUB_TOKEN cannot dispatch into
-#                        another repo (not configured; the schedule covers it)
-#   schedule           — every 6 h, so key-decoder releases land here too
+# How it gets rebuilt:
+#   workflow_call      — ios.yml runs this as the deploy-site job right after
+#                        its release job publishes a .ipa (instant; also the
+#                        only race-free way: the rolling 'ios-latest' release
+#                        is ASSET-UPLOADED on refresh, which does not fire a
+#                        release webhook)
+#   schedule           — every 2 h, so key-decoder releases land here too
+#                        (GITHUB_TOKEN cannot dispatch across repos; giving
+#                        key-decoder a PAT with dispatch rights on this repo
+#                        would make that instant)
 #   workflow_dispatch  — manual "Run workflow"
+#   repository_dispatch(site-refresh) — for authorized external pokes
 #
 name: site
 
 on:
-  release:
-    types: [ published ]
+  workflow_call:
+  workflow_dispatch:
   repository_dispatch:
     types: [ site-refresh ]
-  workflow_dispatch:
   schedule:
-    - cron: '17 */6 * * *'
+    - cron: '23 */2 * * *'
 
 permissions:
   contents: read
