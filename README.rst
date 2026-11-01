@@ -53,7 +53,7 @@ Install
 The easiest way to get the app is the prebuilt build CI publishes:
 
 - Downloads for this app (and KeyDecoder) live on the site:
-  https://spencergraffunder.github.io/pianobar-ios/ — it always links the
+  https://spencergraffunder.github.io/#ios-apps — it always links the
   latest release of each project.
 - CI builds an unsigned ``.ipa`` and publishes it as a GitHub **release** asset
   (``ios-latest``), refreshed on every push to ``master``. Tagged builds are
