@@ -43,16 +43,9 @@ on:
       - '.github/workflows/ios.yml'
   workflow_dispatch:
 
-# Needed to publish the .ipa as a release asset and deploy the hub site.
+# Needed to publish the .ipa as a release asset.
 permissions:
   contents: write
-  pages: write
-  id-token: write
-
-# Shared with site.yml so hub-site deploys never overlap.
-concurrency:
-  group: pages
-  cancel-in-progress: false
 
 jobs:
   # Fast compile check on PRs and pushes to non-default branches —
@@ -174,16 +167,3 @@ jobs:
               --notes "Unsigned .ipa from CI. Re-sign with Sideloadly / AltStore / an ad-hoc profile to install."
           fi
           gh release view "$TAG"
-
-  # Refresh the Pages downloads page from the release we just published.
-  # Rolling 'ios-latest' refreshes are asset uploads, which do NOT fire a
-  # release webhook — so the site rebuild has to be chained here instead of
-  # triggered by `on: release`. The site workflow is shared (schedule/manual
-  # runs reuse the exact same steps).
-  deploy-site:
-    needs: release
-    uses: ./.github/workflows/site.yml
-    permissions:
-      contents: read
-      pages: write
-      id-token: write
