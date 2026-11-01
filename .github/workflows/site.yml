@@ -1,0 +1,76 @@
+#
+# iOS hub site — a GitHub Pages downloads page (site/build.py) listing the
+# latest .ipa from BOTH repos:
+#
+#   SpencerGraffunder/pianobar-ios   (this repo, rolling release 'ios-latest')
+#   SpencerGraffunder/key-decoder    (rolling release 'ios-latest')
+#
+# The page links directly to GitHub Release assets, which download as the
+# BARE .ipa file (Actions run artifacts are always zip-wrapped and are not
+# linked here on purpose).
+#
+# Auto-refresh triggers:
+#   release            — any release published in THIS repo (instant)
+#   repository_dispatch (site-refresh) — for cross-repo pokes; requires a
+#                        secret since GITHUB_TOKEN cannot dispatch into
+#                        another repo (not configured; the schedule covers it)
+#   schedule           — every 6 h, so key-decoder releases land here too
+#   workflow_dispatch  — manual "Run workflow"
+#
+name: site
+
+on:
+  release:
+    types: [ published ]
+  repository_dispatch:
+    types: [ site-refresh ]
+  workflow_dispatch:
+  schedule:
+    - cron: '17 */6 * * *'
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time; newer pushes supersede older renders.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch latest release metadata (public API, unauthenticated)
+        run: |
+          mkdir -p releases
+          for repo in SpencerGraffunder/pianobar-ios SpencerGraffunder/key-decoder; do
+            slug=${repo##*/}
+            # -f: fail on 404 (no release yet) — build.py renders "No release
+            # yet" for missing files, so that is non-fatal here.
+            curl -sfL "https://api.github.com/repos/${repo}/releases/latest" \
+              -o "releases/${slug}.json" \
+              || { echo "no release for ${repo} yet"; rm -f "releases/${slug}.json"; }
+          done
+
+      - name: Render site
+        run: python3 site/build.py --releases-dir releases --out _site
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
