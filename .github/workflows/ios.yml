@@ -166,4 +166,11 @@ jobs:
               --title "iOS build ($TAG)" \
               --notes "Unsigned .ipa from CI. Re-sign with Sideloadly / AltStore / an ad-hoc profile to install."
           fi
+          # Stale asset names must not linger on the release (--clobber only
+          # replaces the SAME name; e.g. the legacy pb.ipa once survived a
+          # rename and the hub site picked the first-listed .ipa).
+          for id in $(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" \
+              --jq '.assets[] | select(.name != "pianobar-ios.ipa") | .id'); do
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$id"
+          done
           gh release view "$TAG"
