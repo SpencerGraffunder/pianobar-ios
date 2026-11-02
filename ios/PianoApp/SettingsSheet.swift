@@ -32,6 +32,8 @@ struct SettingsSheet: View {
                         Text("500 MB").tag(500)
                         Text("1 GB").tag(1000)
                         Text("2 GB").tag(2000)
+                        Text("5 GB").tag(5000)
+                        Text("10 GB").tag(10000)
                     }
                     Picker("Songs to cache", selection: $model.cachePolicy) {
                         Text("Every song").tag(CachePolicy.anySongs)
@@ -41,7 +43,7 @@ struct SettingsSheet: View {
                 } header: {
                     Text("Playback Cache")
                 } footer: {
-                    Text("Cached songs start instantly and play even with no network. When the cache is full, the oldest songs make room for new ones once they are more than a month old. Tapping Tired on a cached song removes it from the cache right away.")
+                    Text("Cached songs start instantly and play even with no network. When the cache is full, the oldest songs make room for new ones once they are more than a month old. Tapping Ban or Tired on a cached song removes it from the cache right away.")
                 }
             }
             .navigationTitle("Settings")

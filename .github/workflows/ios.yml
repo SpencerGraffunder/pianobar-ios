@@ -151,7 +151,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Tag pushes publish under their tag name; manual dispatch
+          # Tag pushes publish under their tag name; everything else
           # refreshes the rolling 'ios-latest' release. Release assets
           # download as the bare .ipa (Actions artifacts are always
           # zipped, which is why we don't use them for the .ipa).
@@ -159,18 +159,21 @@ jobs:
           if [ "$GITHUB_REF_NAME" != "master" ] && [ -n "$GITHUB_REF_NAME" ] && [ "${GITHUB_REF_NAME#v}" != "$GITHUB_REF_NAME" ]; then
             TAG="$GITHUB_REF_NAME"
           fi
+          # Re-create — never `upload --clobber`: a clobbered release keeps
+          # its original published date forever, so GitHub and the hub site
+          # showed 'Sep 2026' even for today's build (looked like nothing
+          # was ever published). Deleting the release keeps the tag; the
+          # fresh release points at this exact commit. (A master push then
+          # has a few seconds' gap where 'ios-latest' briefly 404s — the
+          # hub site's static ipa link still serves after the new release
+          # lands; runner jobs serialize so pushes can't race each other.)
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" pianobar-ios.ipa --clobber
-          else
-            gh release create "$TAG" pianobar-ios.ipa \
-              --title "iOS build ($TAG)" \
-              --notes "Unsigned .ipa from CI. Re-sign with Sideloadly / AltStore / an ad-hoc profile to install."
+            gh release delete "$TAG" --yes
           fi
-          # Stale asset names must not linger on the release (--clobber only
-          # replaces the SAME name; e.g. the legacy pb.ipa once survived a
-          # rename and the hub site picked the first-listed .ipa).
-          for id in $(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" \
-              --jq '.assets[] | select(.name != "pianobar-ios.ipa") | .id'); do
-            gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$id"
-          done
+          gh release create "$TAG" pianobar-ios.ipa \
+            --target "$GITHUB_SHA" \
+            --title "iOS build ($TAG)" \
+            --notes "Unsigned .ipa from CI. Re-sign with Sideloadly / AltStore / an ad-hoc profile to install."
+          # No stale-asset pruning needed: a recreated release holds only
+          # the one asset uploaded here.
           gh release view "$TAG"

@@ -11,7 +11,7 @@
 //    but ONLY once they are more than a month old — fresher songs are never
 //    evicted, so the cache may temporarily ride over its cap.
 //  - "Age" counts from last access (a song you keep playing stays fresh).
-//  - Tapping Tired on a cached song removes it from the cache.
+//  - Tapping Ban or Tired on a cached song removes it from the cache.
 //
 // The class is pure Foundation + injectable directory/clock so the whole
 // policy (hits, persistence, aging, eviction) runs in unit tests.
