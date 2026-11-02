@@ -116,9 +116,16 @@ final class SongCache {
         session = URLSession(configuration: config)
         try? FileManager.default.createDirectory(
             at: self.directory, withIntermediateDirectories: true)
-        // Don't back up cached audio — it is re-downloadable.
+        // Don't back up cached audio — it is re-downloadable. (API per
+        // Apple's "Optimizing Your App's Data for iCloud Backup"; works on
+        // a directory that already exists, which createDirectory just made
+        // sure of. Xcode 26 URL has no setResourceValue(_:forKey:) — this
+        // is the URLResourceValues form.)
         #if os(iOS)
-        try? self.directory.setResourceValue(true, forKey: .isExcludedFromBackup)
+        var cacheDir = self.directory
+        var backupValues = URLResourceValues()
+        backupValues.isExcludedFromBackup = true
+        try? cacheDir.setResourceValues(backupValues)
         #endif
         loadIndex()
     }
