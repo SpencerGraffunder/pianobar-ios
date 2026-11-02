@@ -185,7 +185,7 @@ jobs:
           # the upload (bird syncs it to the account within seconds; no cron,
           # no tokens). continue-on-error: a sync hiccup must never redden a
           # build — the GitHub Release stays the canonical download.
-          DEST="$HOME/Library/Mobile Documents/com~apple~CloudDocs/iOS Apps"
+          DEST="$HOME/Library/Mobile Documents/com~apple~CloudDocs/IPAs"
           mkdir -p "$DEST"
           cp -f pianobar-ios.ipa "$DEST/pianobar-ios.ipa"
           ls -lh "$DEST"
