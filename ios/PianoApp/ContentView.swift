@@ -533,6 +533,9 @@ final class AppModel: ObservableObject, MediaSessionModel {
             status = "Play a song first."
             return
         }
+        // A banned song never comes back — don't hoard its cached audio.
+        songCache.remove(forKey: SongCache.key(
+            forMusicId: song.musicId, title: song.title, artist: song.artist))
         enqueue(.init(kind: .ban,
                       trackToken: song.trackToken,
                       songStationId: song.stationId),
@@ -1683,7 +1686,7 @@ struct HelpSheet: View {
         HelpEntry(id: "addseed", title: "Add Music", systemImage: "plus.circle",
                   detail: "Opens a search where you can add an artist or song to the current station as a seed. The add is queued and sent when a connection is back."),
         HelpEntry(id: "ban", title: "Ban", systemImage: "nosign",
-                  detail: "Stops this song and moves on to the next one immediately, no matter the network; the ban is queued and sent to Pandora when a connection is back."),
+                  detail: "Stops this song and moves on to the next one immediately, no matter the network; removes it from the playback cache, and queues the ban to send to Pandora when a connection is back."),
         HelpEntry(id: "love", title: "Love", systemImage: "heart.fill",
                   detail: "Colors the heart instantly and tells Pandora you love this song so you'll hear more like it; tap again on the same song to clear the heart. Works offline — the love is queued and sent when a connection is back (even after a relaunch)."),
         HelpEntry(id: "tired", title: "Tired", systemImage: "zzz",
