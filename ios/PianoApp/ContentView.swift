@@ -130,7 +130,8 @@ final class AppModel: ObservableObject, MediaSessionModel {
         }
         media = MediaSession(model: self)
         songCache.onChange = { [weak self] in
-            self?.cacheStats = self?.songCache.stats()
+            guard let self else { return }
+            self.cacheStats = self.songCache.stats()
         }
         cacheSizeMB = songCache.sizeMB
         cachePolicy = songCache.policy
