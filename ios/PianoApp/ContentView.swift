@@ -45,6 +45,19 @@ final class AppModel: ObservableObject, MediaSessionModel {
     @Published var isWorking = false
     @Published var showUpcoming = false
 
+    // optimistic sync (server changes applied locally, sent when possible)
+    /// Changes already reflected in the UI, waiting to reach Pandora.
+    @Published private(set) var pendingCommands: [QueuedCommand] = []
+    /// stationId -> new name applied locally, not yet confirmed by the
+    /// server. The C station list keeps the old name until the queued
+    /// rename succeeds, so the UI layers the new name over it.
+    @Published private(set) var renames: [String: String] = [:]
+    /// stationIds the user deleted locally; hidden from the list until the
+    /// queued delete confirms (the C struct must stay alive until then).
+    @Published private(set) var pendingDeletes: Set<String> = []
+
+    var pendingCommandCount: Int { pendingCommands.count }
+
     // text-input prompts
     @Published var prompt: Prompt?
 
@@ -74,6 +87,14 @@ final class AppModel: ObservableObject, MediaSessionModel {
 
     private var client: PianoClient?
     private var working = false
+    /// Serializes all PianoClient use between interactive actions and the
+    /// background sync drain (interactive always wins).
+    private let commandGate = ClientGate()
+    private let pendingStore = PendingCommandsStore()
+    private var syncTask: Task<Void, Never>?
+    /// Guards syncTask bookkeeping against a cancelled-but-still-finishing
+    /// loop clearing a newer loop's slot (logout bumps the generation).
+    private var syncGeneration = 0
     /// Remembers the last station the user played so the app can restore
     /// and auto-play it on the next launch (issue #4). Injectable so tests
     /// can point it at a private `UserDefaults` suite.
@@ -93,6 +114,10 @@ final class AppModel: ObservableObject, MediaSessionModel {
             }
         }
         media = MediaSession(model: self)
+        // Re-arm changes queued in a previous session (e.g. loves made
+        // while offline); they go out once the auto-login below has a
+        // client. Cleared on logout so they never cross accounts.
+        pendingCommands = pendingStore.load()
         // Restore saved credentials and log in automatically, so the user
         // doesn't have to re-enter them on every launch. (If the login
         // fails — bad password, no network — the error shows in the status
@@ -109,6 +134,18 @@ final class AppModel: ObservableObject, MediaSessionModel {
     var selectedStation: Station? {
         guard let id = selectedStationID else { return nil }
         return stations.first { $0.stableId == id }
+    }
+
+    /// Stations to show in the picker / sheets: hides locally-deleted ones
+    /// (the C list still contains them until the queued delete confirms).
+    var visibleStations: [Station] {
+        stations.filter { !pendingDeletes.contains($0.stableId) }
+    }
+
+    /// A station's name as the user currently sees it — the locally
+    /// renamed name wins over the (not yet renamed) C-core name.
+    func displayName(for station: Station) -> String {
+        renames[station.stableId] ?? station.name ?? station.stableId
     }
 
     // MARK: MediaSessionModel (lock screen / Control Center / Bluetooth)
@@ -191,18 +228,28 @@ final class AppModel: ObservableObject, MediaSessionModel {
         isWorking = true
         status = label + "…"
         let started = status
-        Task {
+        Task { [weak self] in
+            guard let self else { return }
+            // Serialize with the background sync drain — both drive the
+            // one C-core handle. A queued send may be in flight; the tap
+            // waits for that one request, and queued commands never start
+            // while an interactive job is waiting.
+            await self.commandGate.acquire()
             do {
                 try await work()
                 // Only apply the default success message when the action
                 // did not set a more specific one itself (e.g. the Explain
                 // button's "We're playing this track because it features …").
-                if status == started { status = label + " done." }
+                if self.status == started { self.status = label + " done." }
+                // A round trip just succeeded — the network is up; give
+                // queued changes their turn now.
+                self.startSyncLoop()
             } catch {
-                status = "Error: \(error.localizedDescription)"
+                self.status = "Error: \(error.localizedDescription)"
             }
-            isWorking = false
-            working = false
+            self.commandGate.release()
+            self.isWorking = false
+            self.working = false
         }
     }
 
@@ -270,6 +317,14 @@ final class AppModel: ObservableObject, MediaSessionModel {
 
     func logout() {
         // The C core has no explicit logout; drop our session.
+        // Queued changes belong to this account — never carry them across.
+        syncTask?.cancel()
+        syncTask = nil
+        syncGeneration += 1
+        pendingCommands = []
+        pendingStore.save([])
+        renames = [:]
+        pendingDeletes = []
         client = nil
         loggedIn = false
         stations = []
@@ -402,31 +457,60 @@ final class AppModel: ObservableObject, MediaSessionModel {
         }
     }
 
-    // MARK: Rating
+    // MARK: Rating (optimistic — the server command queues behind)
 
-    private func advanceAfterRating() async throws {
-        guard let client = client, let station = selectedStation else { return }
-        let songs = try await client.getPlaylist(station: station)
-        playlist = songs
-        markStationCurrent(station)
-        showUpcoming = false
-        playIfAvailable()
-    }
-
-    func rate(_ rating: PianoSongRating_t, label: String) {
-        guard let client = client, let song = currentSong else {
+    /// Ban: the hated song must go SILENT right away regardless of network,
+    /// then the next song starts from the local queue (its audio is already
+    /// prefetched — issue #39) or via a fresh playlist fetch. The ban
+    /// itself is queued and sent to Pandora when the network allows.
+    func banSong() {
+        guard let song = currentSong else {
             status = "Play a song first."
             return
         }
-        run(label) { [weak self] in
-            guard let self else { return }
-            try await client.rateSong(song, rating: rating)
-            try await self.advanceAfterRating()
+        enqueue(.init(kind: .ban,
+                      trackToken: song.trackToken,
+                      songStationId: song.stationId),
+                "Banned — syncing when online.")
+        skipNow()
+    }
+
+    /// Tired: same optimistic treatment as Ban (skip instantly, queue the
+    /// "tired" command for later delivery).
+    func markTired() {
+        guard let song = currentSong else {
+            status = "Play a song first."
+            return
+        }
+        enqueue(.init(kind: .tired,
+                      trackToken: song.trackToken,
+                      songStationId: song.stationId),
+                "Tired noted — syncing when online.")
+        skipNow()
+    }
+
+    /// Skip immediately without a server round trip: prefer the already
+    /// fetched queue tail (its audio is prefetched), and only fall back to
+    /// a network playlist refresh when the tail is empty. On a dead
+    /// network the song still stops and the queue keeps working —
+    /// nextSong()'s refresh just reports the error instead of hanging up.
+    private func skipNow() {
+        if !upcoming.isEmpty {
+            playlist.removeFirst()
+            showUpcoming = false
+            playIfAvailable()
+        } else {
+            player.stop()
+            media.clearNowPlaying()
+            playlist = []
+            nextSong()
         }
     }
 
     /// Love is a toggle on the current song (it does NOT skip):
-    ///  - first press: registers the love with Pandora + colors the heart
+    ///  - first press: colors the heart IMMEDIATELY and queues the love;
+    ///    the background sync loop sends it as soon as the network allows
+    ///    (offline loves even survive an app relaunch).
     ///  - second press on the same song: un-colors it (clears local state).
     /// "Loved" includes songs the server already marked loved (see
     /// isCurrentLoved), so the second press must also clear the rating the
@@ -448,23 +532,162 @@ final class AppModel: ObservableObject, MediaSessionModel {
             status = "Un-loved."
         } else {
             lovedSongIDs.insert(song.id)
-            guard let client = client else { status = "Loved."; return }
-            let c = client
-            run("Loving") {
-                try await c.rateSong(song, rating: PIANO_RATE_LOVE)
-            }
+            enqueue(.init(kind: .love,
+                          trackToken: song.trackToken,
+                          songStationId: song.stationId),
+                    "Loved — syncing when online.")
         }
     }
 
-    func markTired() {
-        guard let client = client, let song = currentSong else {
-            status = "Play a song first."
-            return
+    // MARK: - Offline command queue (optimistic UI sync engine)
+
+    /// Record a change the UI already applied and try to send it.
+    private func enqueue(_ cmd: QueuedCommand, _ note: String) {
+        // Don't keep exact duplicates (re-love of the same song); the
+        // newest copy goes to the back of the queue.
+        if let i = pendingCommands.firstIndex(of: cmd) {
+            pendingCommands.remove(at: i)
         }
-        run("Tired") { [weak self] in
-            guard let self else { return }
-            try await client.markTired(song)
-            try await self.advanceAfterRating()
+        pendingCommands.append(cmd)
+        pendingStore.save(pendingCommands)
+        status = note
+        startSyncLoop()
+    }
+
+    /// Start the background drain if it isn't already running. Also called
+    /// after any successful interactive round trip (network proven).
+    private func startSyncLoop() {
+        guard syncTask == nil, client != nil, !pendingCommands.isEmpty
+        else { return }
+        syncGeneration += 1
+        let gen = syncGeneration
+        syncTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                guard self.client != nil, !self.pendingCommands.isEmpty
+                else { break }
+                // Only run when no interactive action wants the client —
+                // a queued send must never delay Play/Next taps.
+                await self.commandGate.waitUntilIdle()
+                guard !Task.isCancelled else { break }
+                guard self.commandGate.tryAcquireForBackground() else {
+                    continue   // an interactive job beat us to it
+                }
+                let retryLater = await self.syncPendingLocked()
+                self.commandGate.release()
+                if retryLater {
+                    // Network dead — check again after a short backoff.
+                    try? await Task.sleep(nanoseconds: 20_000_000_000)
+                }
+            }
+            // Only clear the slot if nobody replaced us (logout + relogin
+            // can start a fresh loop while this one unwinds).
+            if let self, self.syncGeneration == gen { self.syncTask = nil }
+        }
+    }
+
+    /// Send queued commands in order, one at a time. Call only while
+    /// holding the gate. Returns true when the head command failed on the
+    /// network and should be retried later (it stays queued).
+    private func syncPendingLocked() async -> Bool {
+        guard let client else { return false }
+        var didSync = false
+        while let cmd = pendingCommands.first {
+            do {
+                try await send(cmd, via: client)
+                pendingCommands.removeFirst()
+                pendingStore.save(pendingCommands)
+                didSync = true
+                afterSynced(cmd)
+            } catch let err as PianoError {
+                // Transient (dead/off network, Pandora maintenance, an
+                // auth token that outlived the queue) → keep and retry.
+                // Anything else is a server-side rejection the queue can't
+                // fix by waiting → drop it with a status note.
+                let transient: Bool
+                switch err {
+                case .network:
+                    transient = true
+                case .badData:
+                    transient = false
+                case .piano(let rc):
+                    transient = (rc == PIANO_RET_P_MAINTENANCE_MODE
+                              || rc == PIANO_RET_P_INSUFFICIENT_CONNECTIVITY
+                              || rc == PIANO_RET_P_READ_ONLY_MODE
+                              || rc == PIANO_RET_P_INVALID_AUTH_TOKEN)
+                }
+                if transient { return true }
+                pendingCommands.removeFirst()
+                pendingStore.save(pendingCommands)
+                status = "Sync failed: \(err.localizedDescription)"
+            } catch {
+                // URLSession-level error (no route, DNS, timeout): keep
+                // the command and try again after the backoff.
+                return true
+            }
+        }
+        if didSync, pendingCommands.isEmpty, !working {
+            status = "All changes synced to Pandora."
+        }
+        return false
+    }
+
+    /// One queued command → Pandora. `quick: true` sends use a short
+    /// single-attempt timeout so a dead network fails fast off the gate.
+    /// Stations are re-looked-up by id (the C structs from enqueue time may
+    /// be long gone); a station that no longer exists means the command's
+    /// goal is already satisfied (deleted) or unreachable (dropped).
+    private func send(_ cmd: QueuedCommand, via client: PianoClient) async throws {
+        switch cmd.kind {
+        case .love:
+            try await client.rateSong(trackToken: cmd.trackToken,
+                                      stationId: cmd.songStationId,
+                                      rating: PIANO_RATE_LOVE, quick: true)
+        case .ban:
+            try await client.rateSong(trackToken: cmd.trackToken,
+                                      stationId: cmd.songStationId,
+                                      rating: PIANO_RATE_BAN, quick: true)
+        case .tired:
+            try await client.markTired(trackToken: cmd.trackToken,
+                                       stationId: cmd.songStationId,
+                                       quick: true)
+        case .addSeed:
+            guard let sid = cmd.stationId,
+                  let station = client.station(id: sid),
+                  let musicId = cmd.musicId else { return }
+            try await client.addSeed(to: station, musicId: musicId,
+                                     quick: true)
+        case .rename:
+            guard let sid = cmd.stationId,
+                  let station = client.station(id: sid),
+                  let name = cmd.newName else { return }
+            try await client.renameStation(station, newName: name,
+                                           quick: true)
+        case .deleteStation:
+            guard let sid = cmd.stationId,
+                  let station = client.station(id: sid) else { return }
+            try await client.deleteStation(station, quick: true)
+        }
+    }
+
+    /// Local bookkeeping after a queued command reaches the server.
+    private func afterSynced(_ cmd: QueuedCommand) {
+        switch cmd.kind {
+        case .love, .ban, .tired, .addSeed:
+            break   // the local UI was already correct; nothing to refresh
+        case .rename:
+            if let sid = cmd.stationId { renames.removeValue(forKey: sid) }
+            if let client { stations = client.stations() }
+        case .deleteStation:
+            if let sid = cmd.stationId { pendingDeletes.remove(sid) }
+            guard let client else { return }
+            // The core freed the deleted station — rebuild our wrappers
+            // BEFORE anything can touch a stale Station pointer.
+            stations = client.stations()
+            if let id = selectedStationID,
+               !stations.contains(where: { $0.stableId == id }) {
+                selectedStationID = visibleStations.first?.stableId
+            }
         }
     }
 
@@ -543,39 +766,43 @@ final class AppModel: ObservableObject, MediaSessionModel {
     }
 
     func confirmRename() {
-        guard let client = client, let station = selectedStation else { return }
+        guard let station = selectedStation else { return }
         let name = promptText.trimmingCharacters(in: .whitespaces)
         prompt = nil
         guard !name.isEmpty else { return }
-        run("Renaming") { [weak self] in
-            guard let self else { return }
-            try await client.renameStation(station, newName: name)
-            // The core updated the name in place; refresh the list copy.
-            self.stations = client.stations()
-            self.status = "Station renamed."
-        }
+        // Show the new name immediately (display overlay — the C list is
+        // updated when the queued rename confirms) and queue the command.
+        let sid = station.stableId
+        renames[sid] = name
+        enqueue(.init(kind: .rename, stationId: sid, newName: name),
+                "Station renamed — syncing when online.")
     }
 
     func deleteStation() {
-        guard let client = client, let station = selectedStation else { return }
-        run("Deleting") { [weak self] in
-            guard let self else { return }
-            try await client.deleteStation(station)
-            // The core freed the station and removed it from the list.
-            self.stations = client.stations()
-            self.selectedStationID = self.stations.first?.stableId
-            self.playlist = []
-            self.player.stop()
-            self.status = "Station deleted."
-        }
+        guard let station = selectedStation else { return }
+        let sid = station.stableId
+        // Reflect the deletion immediately: hide the station (the C struct
+        // must stay alive until the queued delete confirms), stop anything
+        // playing from it, and move the selection to another station.
+        pendingDeletes.insert(sid)
+        renames.removeValue(forKey: sid)
+        playlist = []
+        showUpcoming = false
+        player.stop()
+        media.clearNowPlaying()
+        selectedStationID = stations
+            .first { $0.stableId != sid && !pendingDeletes.contains($0.stableId) }?
+            .stableId
+        enqueue(.init(kind: .deleteStation, stationId: sid),
+                "Station deleted — syncing when online.")
     }
 
     // MARK: Quick mix / station selection (issue #24)
 
-    /// Stations eligible for the QuickMix include list (everything except the
-    /// QuickMix station itself).
+    /// Stations eligible for the QuickMix include list (everything except
+    /// the QuickMix station itself and anything already deleted locally).
     var stationSelectList: [Station] {
-        stations.filter { !$0.isQuickMix }
+        stations.filter { !$0.isQuickMix && !pendingDeletes.contains($0.stableId) }
     }
 
     /// Open the "Select stations" sheet (issue #24). Tapping the button now
@@ -717,13 +944,12 @@ final class AppModel: ObservableObject, MediaSessionModel {
 
     /// Add a search result to the current station as a seed (driven by the
     /// "Add Music" sheet). Results carry a musicId usable as a seed directly.
+    /// Optimistic: the add is queued and sent when the network allows.
     func addSeedFromMusicId(_ musicId: String) {
-        guard let client = client, let station = selectedStation,
-              !musicId.isEmpty else { return }
-        let c = client
-        run("Adding music") {
-            try await c.addSeed(to: station, musicId: musicId)
-        }
+        guard let station = selectedStation, !musicId.isEmpty else { return }
+        enqueue(.init(kind: .addSeed, stationId: station.stableId,
+                      musicId: musicId),
+                "Added to station — syncing when online.")
     }
 }
 
@@ -889,8 +1115,8 @@ struct ContentView: View {
             set: { model.stationDidSelect($0) }
         )) {
                 Text("—").tag(String?.none)
-                ForEach(model.stations) { s in
-                    Text(s.name ?? s.stableId).tag(Optional(s.stableId))
+                ForEach(model.visibleStations) { s in
+                    Text(model.displayName(for: s)).tag(Optional(s.stableId))
                 }
             }
             .pickerStyle(.menu)
@@ -965,9 +1191,14 @@ struct ContentView: View {
     /// the elapsed time every second.
     private var songMetaLine: some View {
         TimelineView(.periodic(from: .now, by: 1)) { _ in
-            HStack {
+            HStack(spacing: 10) {
                 Text(locationText)
                 Spacer()
+                if model.pendingCommandCount > 0 {
+                    // Optimistic changes waiting for a connection.
+                    Text("\(model.pendingCommandCount) queued")
+                        .foregroundStyle(.tertiary)
+                }
                 Text(String(format: "%.2fx", model.player.playbackSpeed))
             }
             .font(.footnote.monospacedDigit())
@@ -1024,7 +1255,7 @@ struct ContentView: View {
                   action: { model.showAddSearch = true }),
             .init(id: "ban", title: "Ban", systemImage: "nosign",
                   role: .normal, enabled: hasSong,
-                  action: { model.rate(PIANO_RATE_BAN, label: "Banning") }),
+                  action: model.banSong),
             .init(id: "love", title: model.isCurrentLoved ? "Loved" : "Love",
                   systemImage: "heart.fill",
                   role: model.isCurrentLoved ? .loved : .normal,
@@ -1293,7 +1524,7 @@ struct StationSelectSheet: View {
                             model.toggleQuickMixPick(row.station.stableId)
                         } label: {
                             HStack {
-                                Text(row.station.name ?? "(unnamed)")
+                                Text(model.displayName(for: row.station))
                                     .lineLimit(1)
                                 Spacer()
                                 if row.picked {
@@ -1360,9 +1591,9 @@ struct HelpSheet: View {
 
     private let entries: [HelpEntry] = [
         HelpEntry(id: "delete", title: "Delete Station", systemImage: "trash",
-                  detail: "Deletes the currently selected station from your account."),
+                  detail: "Removes the currently selected station from your list right away; it is deleted from your account (for good) when a connection is back."),
         HelpEntry(id: "rename", title: "Rename Station", systemImage: "pencil",
-                  detail: "Renames the currently selected station."),
+                  detail: "Renames the currently selected station right away; the change is queued and sent to Pandora when a connection is back."),
         HelpEntry(id: "quickmix", title: "Select Stations", systemImage: "shuffle",
                   detail: "On a QuickMix station, choose which of your stations to blend into the mix (checkmark list). Only skips to a new song if the current song is from an excluded station."),
         HelpEntry(id: "explain", title: "Explain", systemImage: "questionmark.circle",
@@ -1370,13 +1601,13 @@ struct HelpSheet: View {
         HelpEntry(id: "upcoming", title: "Upcoming", systemImage: "list.bullet",
                   detail: "Toggles the list of the next few songs in the queue."),
         HelpEntry(id: "addseed", title: "Add Music", systemImage: "plus.circle",
-                  detail: "Opens a search where you can add an artist or song to the current station as a seed."),
+                  detail: "Opens a search where you can add an artist or song to the current station as a seed. The add is queued and sent when a connection is back."),
         HelpEntry(id: "ban", title: "Ban", systemImage: "nosign",
-                  detail: "Tells Pandora to stop playing this song and then moves on to the next one."),
+                  detail: "Stops this song and moves on to the next one immediately, no matter the network; the ban is queued and sent to Pandora when a connection is back."),
         HelpEntry(id: "love", title: "Love", systemImage: "heart.fill",
-                  detail: "Tells Pandora you love this song so you'll hear more like it; tap again on the same song to clear the heart."),
+                  detail: "Colors the heart instantly and tells Pandora you love this song so you'll hear more like it; tap again on the same song to clear the heart. Works offline — the love is queued and sent when a connection is back (even after a relaunch)."),
         HelpEntry(id: "tired", title: "Tired", systemImage: "zzz",
-                  detail: "Tells Pandora you've heard this one too many times and then moves on to the next song."),
+                  detail: "Moves on to the next song immediately; the tired-note is queued and sent to Pandora when a connection is back."),
         HelpEntry(id: "save", title: "Save", systemImage: "square.and.arrow.down",
                   detail: "Downloads the current song as an .m4a and lets you save it to Music or Files."),
         HelpEntry(id: "playpause", title: "Play / Pause", systemImage: "play.fill",
