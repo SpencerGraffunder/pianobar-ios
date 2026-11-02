@@ -58,6 +58,20 @@ final class AppModel: ObservableObject, MediaSessionModel {
 
     var pendingCommandCount: Int { pendingCommands.count }
 
+    // song cache (persistent audio — see SongCache.swift + SettingsSheet)
+    @Published var showSettings = false
+    @Published private(set) var cacheStats = SongCache.Stats()
+    /// Cache cap in MB (0 = Off). Persisted through the cache itself.
+    @Published var cacheSizeMB: Int = SongCache.defaultSizeMB {
+        didSet {
+            songCache.sizeMB = cacheSizeMB   // persists + runs eviction
+            refreshCacheStats()
+        }
+    }
+    @Published var cachePolicy: CachePolicy = .anySongs {
+        didSet { songCache.policy = cachePolicy }
+    }
+
     // text-input prompts
     @Published var prompt: Prompt?
 
@@ -91,6 +105,7 @@ final class AppModel: ObservableObject, MediaSessionModel {
     /// background sync drain (interactive always wins).
     private let commandGate = ClientGate()
     private let pendingStore = PendingCommandsStore()
+    private let songCache = SongCache()
     private var syncTask: Task<Void, Never>?
     /// Guards syncTask bookkeeping against a cancelled-but-still-finishing
     /// loop clearing a newer loop's slot (logout bumps the generation).
@@ -114,6 +129,12 @@ final class AppModel: ObservableObject, MediaSessionModel {
             }
         }
         media = MediaSession(model: self)
+        songCache.onChange = { [weak self] in
+            self?.cacheStats = self?.songCache.stats()
+        }
+        cacheSizeMB = songCache.sizeMB
+        cachePolicy = songCache.policy
+        cacheStats = songCache.stats()
         // Re-arm changes queued in a previous session (e.g. loves made
         // while offline); they go out once the auto-login below has a
         // client. Cleared on logout so they never cross accounts.
@@ -176,10 +197,11 @@ final class AppModel: ObservableObject, MediaSessionModel {
         if player.canResume {
             player.resume()
             updateNowPlaying()
-        } else if let url = currentSong?.audioUrl, let u = URL(string: url) {
+        } else if let song = currentSong, let u = playbackURL(for: song) {
             player.play(url: u)
             updateNowPlaying()
             prefetchNextSong()
+            maybeCacheSong(song)
         }
     }
 
@@ -348,7 +370,7 @@ final class AppModel: ObservableObject, MediaSessionModel {
     // MARK: Transport
 
     private func playIfAvailable() {
-        if let url = currentSong?.audioUrl, let u = URL(string: url) {
+        if let song = currentSong, let u = playbackURL(for: song) {
             // A song is starting from this station — remember it as the
             // most recently played so the app can restore it on launch
             // (issue #4).
@@ -361,10 +383,47 @@ final class AppModel: ObservableObject, MediaSessionModel {
             // #39): on a bad network the switch is then instant instead
             // of waiting for the download.
             prefetchNextSong()
+            maybeCacheSong(song)
         } else if currentSong != nil {
             status = "This song has no audio URL."
         }
     }
+
+    /// Where a song actually plays from: the local cache first (instant,
+    /// works with no network at all), otherwise the remote audio URL.
+    private func playbackURL(for song: Song) -> URL? {
+        let key = SongCache.key(forMusicId: song.musicId,
+                                title: song.title, artist: song.artist)
+        if let local = songCache.cachedFileURL(forKey: key) {
+            songCache.markPlayed(forKey: key)
+            return local
+        }
+        return song.audioUrl.flatMap { URL(string: $0) }
+    }
+
+    /// Store a song in the cache when the policy says so: every song, or
+    /// only loved ones (loved locally this session or loved by the server
+    /// on the playlist). No-ops when the cache is off or the song is
+    /// already stored / downloading.
+    private func maybeCacheSong(_ song: Song) {
+        guard songCache.isEnabled else { return }
+        let loved = lovedSongIDs.contains(song.id)
+            || song.rating == PIANO_RATE_LOVE
+        guard songCache.policy == .anySongs || loved else { return }
+        cacheSong(song)
+    }
+
+    /// Kick off the background download into the cache.
+    private func cacheSong(_ song: Song) {
+        songCache.ensureCached(
+            key: SongCache.key(forMusicId: song.musicId,
+                               title: song.title, artist: song.artist),
+            remoteURL: song.audioUrl.flatMap { URL(string: $0) },
+            title: song.title ?? "", artist: song.artist ?? "")
+    }
+
+    func refreshCacheStats() { cacheStats = songCache.stats() }
+
 
     /// Start downloading the next song's audio now so tapping Next (or the
     /// current song ending) doesn't wait on a fresh download (issue #39).
@@ -374,6 +433,10 @@ final class AppModel: ObservableObject, MediaSessionModel {
         guard let next = upcoming.first,
               let urlString = next.audioUrl,
               let url = URL(string: urlString) else { return }
+        // Already in the cache — it plays from disk, no download needed.
+        if songCache.cachedFileURL(forKey: SongCache.key(
+                forMusicId: next.musicId, title: next.title,
+                artist: next.artist)) != nil { return }
         player.prefetch(url: url)
     }
 
@@ -446,10 +509,11 @@ final class AppModel: ObservableObject, MediaSessionModel {
             // (same fix as the lock-screen/Control-Center path).
             player.resume()
             updateNowPlaying()
-        } else if let url = currentSong?.audioUrl, let u = URL(string: url) {
+        } else if let song = currentSong, let u = playbackURL(for: song) {
             player.play(url: u)
             updateNowPlaying()
             prefetchNextSong()
+            maybeCacheSong(song)
         } else {
             // No playable song yet (empty queue, or the current song has no
             // audio URL) — fetch the next song from the station and start it.
@@ -482,6 +546,9 @@ final class AppModel: ObservableObject, MediaSessionModel {
             status = "Play a song first."
             return
         }
+        // A tired song must not linger in the cache (Spec's rule).
+        songCache.remove(forKey: SongCache.key(
+            forMusicId: song.musicId, title: song.title, artist: song.artist))
         enqueue(.init(kind: .tired,
                       trackToken: song.trackToken,
                       songStationId: song.stationId),
@@ -536,6 +603,9 @@ final class AppModel: ObservableObject, MediaSessionModel {
                           trackToken: song.trackToken,
                           songStationId: song.stationId),
                     "Loved — syncing when online.")
+            // A loved song is the likeliest to return — store it now,
+            // even under the loved-only policy.
+            cacheSong(song)
         }
     }
 
@@ -1081,6 +1151,9 @@ struct ContentView: View {
         .sheet(isPresented: $model.showHelp) {
             HelpSheet()
         }
+        .sheet(isPresented: $model.showSettings) {
+            SettingsSheet(model: model)
+        }
         .sheet(isPresented: $model.showStationSelect) {
             StationSelectSheet(model: model)
         }
@@ -1092,6 +1165,12 @@ struct ContentView: View {
             ToolbarItem(placement: .topBarLeading) {
                 Button { model.showHelp = true } label: {
                     Image(systemName: "questionmark.circle")
+                }
+            }
+            ToolbarItem(placement: .topBarLeading) {
+                // Cache & playback settings (gear, next to Help).
+                Button { model.showSettings = true } label: {
+                    Image(systemName: "gearshape")
                 }
             }
             ToolbarItemGroup(placement: .topBarTrailing) {
@@ -1624,6 +1703,8 @@ struct HelpSheet: View {
                   detail: "Re-loads your station list from your Pandora account (top-right toolbar)."),
         HelpEntry(id: "logout", title: "Log out", systemImage: "rectangle.portrait.and.arrow.right",
                   detail: "Ends the session and returns you to the login screen (top-right toolbar)."),
+        HelpEntry(id: "settings", title: "Settings", systemImage: "gearshape",
+                  detail: "Opens the settings sheet (top-left toolbar, next to Help) — the playback cache: size, which songs to save, and how full it is."),
     ]
 
     var body: some View {
