@@ -219,10 +219,19 @@ final class PianoClient {
     /// used by rate / tired / explain / bookmark). The caller owns the result
     /// and releases it with `freeCSong` once the request has finished.
     private func makeCSong(_ song: Song) -> UnsafeMutablePointer<PianoSong> {
+        makeCSong(trackToken: song.trackToken, stationId: song.stationId)
+    }
+
+    /// Token-based variant used by the offline command queue: at send time
+    /// the original `Song` struct may be long gone, but the tokens captured
+    /// when the command was queued are exactly what the core reads.
+    private func makeCSong(trackToken: String?, stationId: String?)
+        -> UnsafeMutablePointer<PianoSong>
+    {
         let s = UnsafeMutablePointer<PianoSong>.allocate(capacity: 1)
         memset(s, 0, MemoryLayout<PianoSong>.stride)
-        if let t = song.trackToken { s.pointee.trackToken = cCopy(t) }
-        if let sid = song.stationId { s.pointee.stationId = cCopy(sid) }
+        if let t = trackToken { s.pointee.trackToken = cCopy(t) }
+        if let sid = stationId { s.pointee.stationId = cCopy(sid) }
         return s
     }
 
@@ -238,6 +247,8 @@ final class PianoClient {
     /// call (before it is freed).
     private func runData<T>(
         _ type: PianoRequestType_t,
+        timeout: TimeInterval = 30,
+        attempts: Int = 3,
         setup: (UnsafeMutablePointer<T>) -> Void,
         finish: ((UnsafeMutablePointer<T>) -> Void)? = nil
     ) async throws {
@@ -245,7 +256,8 @@ final class PianoClient {
         memset(d, 0, MemoryLayout<T>.stride)
         setup(d)
         do {
-            try await call(type, data: UnsafeMutableRawPointer(d))
+            try await call(type, data: UnsafeMutableRawPointer(d),
+                           timeout: timeout, attempts: attempts)
             finish?(d)
         } catch {
             d.deallocate()
@@ -263,7 +275,9 @@ final class PianoClient {
     // MARK: - Generic call loop (mirrors BarUiPianoCall in ui.c)
 
     private func call(_ type: PianoRequestType_t,
-                      data: UnsafeMutableRawPointer?) async throws {
+                      data: UnsafeMutableRawPointer?,
+                      timeout: TimeInterval = 30,
+                      attempts: Int = 3) async throws {
         var steps = 0
         var didReauth = false
         var pRet: PianoReturn_t = PIANO_RET_OK
@@ -289,7 +303,8 @@ final class PianoClient {
                 let path = String(cString: pathC)
 
                 let body = try await performHTTP(
-                    path: path, secure: req.secure, postData: req.postData)
+                    path: path, secure: req.secure, postData: req.postData,
+                    timeout: timeout, attempts: attempts)
 
                 // Store the body NUL-terminated (glue strdups it).
                 var buf = [UInt8](body)
@@ -329,8 +344,13 @@ final class PianoClient {
     /// the regression guard in PianoNetworkTests) — a single flaky 504
     /// should not hard-fail the request. 4xx and other non-transient
     /// failures throw immediately.
+    /// `timeout`/`attempts` shrink for queued background sends
+    /// (`quick: true`): one attempt, shorter timeout, so a dead network
+    /// fails fast and releases the gate for interactive actions.
     private func performHTTP(path: String, secure: Bool,
-                             postData: UnsafeMutablePointer<CChar>?)
+                             postData: UnsafeMutablePointer<CChar>?,
+                             timeout: TimeInterval = 30,
+                             attempts: Int = 3)
         async throws -> Data
     {
         let scheme = secure ? "https" : "http"
@@ -341,7 +361,7 @@ final class PianoClient {
                 "bad URL: \(scheme)://\(Self.rpcHost):\(port)\(path)")
         }
 
-        var http = URLRequest(url: url, timeoutInterval: 30)
+        var http = URLRequest(url: url, timeoutInterval: timeout)
         http.httpMethod = "POST"
         http.setValue("text/plain", forHTTPHeaderField: "Content-Type")
         http.setValue("pianobar-ios/1.0", forHTTPHeaderField: "User-Agent")
@@ -358,7 +378,7 @@ final class PianoClient {
               url.absoluteString, reqHdrs, Int32(bodyLen))
 
         let transient = Set([502, 503, 504])
-        let maxAttempts = 3
+        let maxAttempts = max(1, attempts)
         for attempt in 1...maxAttempts {
             let (data, response) = try await URLSession.shared.data(for: http)
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
@@ -461,9 +481,19 @@ final class PianoClient {
 
     /// Love / ban the current song.
     func rateSong(_ song: Song, rating: PianoSongRating_t) async throws {
-        let cs = makeCSong(song)
+        try await rateSong(trackToken: song.trackToken,
+                           stationId: song.stationId, rating: rating)
+    }
+
+    /// Rate by token (used by the offline command queue). `quick: true`
+    /// uses one short HTTP attempt — a queued send must not hog the gate.
+    func rateSong(trackToken: String?, stationId: String?,
+                  rating: PianoSongRating_t, quick: Bool = false) async throws {
+        let cs = makeCSong(trackToken: trackToken, stationId: stationId)
         defer { freeCSong(cs) }
-        try await runData(PIANO_REQUEST_RATE_SONG) {
+        try await runData(PIANO_REQUEST_RATE_SONG,
+                          timeout: quick ? 12 : 30,
+                          attempts: quick ? 1 : 3) {
             (d: UnsafeMutablePointer<PianoRequestDataRateSong_t>) in
             d.pointee.song = cs
             d.pointee.rating = rating
@@ -472,10 +502,19 @@ final class PianoClient {
 
     /// Mark the current song as "tired" (sleep for a month).
     func markTired(_ song: Song) async throws {
-        let cs = makeCSong(song)
+        try await markTired(trackToken: song.trackToken,
+                            stationId: song.stationId)
+    }
+
+    /// Tired by token (used by the offline command queue).
+    func markTired(trackToken: String?, stationId: String?,
+                   quick: Bool = false) async throws {
+        let cs = makeCSong(trackToken: trackToken, stationId: stationId)
         defer { freeCSong(cs) }
         try await call(PIANO_REQUEST_ADD_TIRED_SONG,
-                       data: UnsafeMutableRawPointer(cs))
+                       data: UnsafeMutableRawPointer(cs),
+                       timeout: quick ? 12 : 30,
+                       attempts: quick ? 1 : 3)
     }
 
     /// Search for artists and songs. Results are copied to Swift values
@@ -541,10 +580,13 @@ final class PianoClient {
     }
 
     /// Add a seed (musicId) to a station.
-    func addSeed(to station: Station, musicId: String) async throws {
+    func addSeed(to station: Station, musicId: String,
+                 quick: Bool = false) async throws {
         let m = cCopy(musicId)
         defer { free(m) }
-        try await runData(PIANO_REQUEST_ADD_SEED) {
+        try await runData(PIANO_REQUEST_ADD_SEED,
+                          timeout: quick ? 12 : 30,
+                          attempts: quick ? 1 : 3) {
             (d: UnsafeMutablePointer<PianoRequestDataAddSeed_t>) in
             d.pointee.station = station.raw
             d.pointee.musicId = m
@@ -573,10 +615,13 @@ final class PianoClient {
     }
 
     /// Rename the selected station.
-    func renameStation(_ station: Station, newName: String) async throws {
+    func renameStation(_ station: Station, newName: String,
+                       quick: Bool = false) async throws {
         let n = cCopy(newName)
         defer { free(n) }
-        try await runData(PIANO_REQUEST_RENAME_STATION) {
+        try await runData(PIANO_REQUEST_RENAME_STATION,
+                          timeout: quick ? 12 : 30,
+                          attempts: quick ? 1 : 3) {
             (d: UnsafeMutablePointer<PianoRequestDataRenameStation_t>) in
             d.pointee.station = station.raw
             d.pointee.newName = n
@@ -585,9 +630,11 @@ final class PianoClient {
 
     /// Delete a station (server + local list). After this call the
     /// `Station`'s underlying C struct is freed — do not use it again.
-    func deleteStation(_ station: Station) async throws {
+    func deleteStation(_ station: Station, quick: Bool = false) async throws {
         try await call(PIANO_REQUEST_DELETE_STATION,
-                       data: UnsafeMutableRawPointer(station.raw))
+                       data: UnsafeMutableRawPointer(station.raw),
+                       timeout: quick ? 12 : 30,
+                       attempts: quick ? 1 : 3)
     }
 
     /// Ask why the current song was played. Returns a human-readable
