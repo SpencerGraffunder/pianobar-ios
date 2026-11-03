@@ -192,4 +192,75 @@ final class SongCacheTests: XCTestCase {
                                            title: "Other", artist: "Act"))
         XCTAssertNil(SongCache.key(forMusicId: nil, title: nil, artist: nil))
     }
+
+    // MARK: Offline Mix support (stored identity)
+
+    func testEntriesCarryPandoraIdentity() throws {
+        let c = makeCache(sizeMB: 250)
+        defer { cleanup() }
+        let src = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString + ".m4a")
+        try Data(count: 100).write(to: src)
+        c.insertFile(at: src, key: "M77", title: "Song", artist: "Act",
+                     ext: "m4a", musicId: "M77", trackToken: "C123",
+                     stationId: "S9")
+
+        let all = c.allEntries()
+        XCTAssertEqual(all.count, 1)
+        XCTAssertEqual(all[0].key, "M77")
+        XCTAssertEqual(all[0].trackToken, "C123")
+        XCTAssertEqual(all[0].songStationId, "S9")
+
+        // Identity must survive the index round trip (that is the whole
+        // point: feedback works with no network).
+        let relaunched = SongCache(
+            defaults: UserDefaults(suiteName: suiteName)!, directory: dir)
+        XCTAssertEqual(relaunched.allEntries()[0].trackToken, "C123")
+    }
+
+    func testLegacyEntriesWithoutIdentityStillPlay() throws {
+        let c = makeCache(sizeMB: 250)
+        defer { cleanup() }
+        try seed(c, key: "M1", bytes: 100)          // pre-change insert
+        XCTAssertNotNil(c.cachedFileURL(forKey: "M1"))
+        XCTAssertEqual(c.allEntries()[0].trackToken, nil)
+        // Still perfectly playable in the Offline Mix (file + name only).
+        XCTAssertEqual(c.stats().count, 1)
+    }
+
+    func testIdentityBackfillsOnReplay() throws {
+        let c = makeCache(sizeMB: 250)
+        defer { cleanup() }
+        try seed(c, key: "M2", bytes: 100)          // cached before tokens
+        XCTAssertNil(c.allEntries()[0].trackToken)
+        // Streaming it again online reports the tokens → merged in.
+        c.ensureCached(key: "M2", remoteURL: nil, title: "T-M2", artist: "A",
+                       musicId: "M2", trackToken: "C55", stationId: "S3")
+        let e = c.allEntries()[0]
+        XCTAssertEqual(e.trackToken, "C55")
+        XCTAssertEqual(e.songStationId, "S3")
+        XCTAssertNotNil(c.cachedFileURL(forKey: "M2"))   // file untouched
+    }
+
+    func testReinsertKeepsOriginalAgeAndTokens() throws {
+        let c = makeCache(sizeMB: 250)
+        defer { cleanup() }
+        let src = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString + ".m4a")
+        try Data(count: 100).write(to: src)
+        c.insertFile(at: src, key: "M8", title: "Song", artist: "Act",
+                     ext: "m4a", musicId: "M8", trackToken: "C9",
+                     stationId: "S1")
+        let added = c.allEntries()[0].addedAt
+        fakeDate += days(10)
+        let src2 = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString + ".m4a")
+        try Data(count: 120).write(to: src2)
+        c.insertFile(at: src2, key: "M8", title: "Song", artist: "Act",
+                     ext: "m4a")                   // no tokens this time
+        let e = c.allEntries()[0]
+        XCTAssertEqual(e.addedAt, added)            // age not reset
+        XCTAssertEqual(e.trackToken, "C9")          // tokens kept
+        XCTAssertEqual(e.bytes, 120)
+    }
 }

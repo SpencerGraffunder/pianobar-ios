@@ -45,6 +45,18 @@ final class AppModel: ObservableObject, MediaSessionModel {
     @Published var isWorking = false
     @Published var showUpcoming = false
 
+    // offline mode + Offline Mix (cached songs as a pseudo-station)
+    @Published var offlineMode = false
+    @Published var offlineStations: [SavedStation] = []
+    private let stationSnapshot = StationSnapshotStore()
+    private var loginInFlight = false
+    /// Offline Mix: the remaining shuffled entries with no connection.
+    private var mixQueue: [SongCache.Entry] = []
+    /// Last mix song played — a new shuffle pass never repeats it first.
+    private var mixJustPlayed: String?
+    /// Pseudo-station id for the cached-songs shuffle.
+    static let offlineMixID = "offline-mix"
+
     // optimistic sync (server changes applied locally, sent when possible)
     /// Changes already reflected in the UI, waiting to reach Pandora.
     @Published private(set) var pendingCommands: [QueuedCommand] = []
@@ -140,6 +152,9 @@ final class AppModel: ObservableObject, MediaSessionModel {
         // while offline); they go out once the auto-login below has a
         // client. Cleared on logout so they never cross accounts.
         pendingCommands = pendingStore.load()
+        // Station names from the last online list, so the station bar can
+        // show something when the app opens with no network.
+        offlineStations = stationSnapshot.load()
         // Restore saved credentials and log in automatically, so the user
         // doesn't have to re-enter them on every launch. (If the login
         // fails — bad password, no network — the error shows in the status
@@ -229,6 +244,29 @@ final class AppModel: ObservableObject, MediaSessionModel {
 
     var currentSong: Song? { playlist.first }
 
+    /// Whether the cached-songs shuffle (pseudo-station) is selected.
+    var isMixSelected: Bool { selectedStationID == Self.offlineMixID }
+
+    /// Case/punctuation-insensitive song-name key for matching.
+    nonisolated static func normalizeSongName(_ s: String) -> String {
+        s.lowercased().filter { $0.isLetter || $0.isNumber }
+    }
+
+    /// First search result whose title+artist match exactly (modulo case
+    /// and punctuation) AND that carries a trackToken — used to resolve
+    /// queued commands for cached songs predating token storage.
+    nonisolated static func searchMatch(title: String, artist: String,
+                                        in songs: [SearchSong]) -> SearchSong? {
+        let wantT = normalizeSongName(title)
+        let wantA = normalizeSongName(artist)
+        guard !wantT.isEmpty, !wantA.isEmpty else { return nil }
+        return songs.first {
+            $0.trackToken != nil
+                && normalizeSongName($0.title) == wantT
+                && normalizeSongName($0.artist) == wantA
+        }
+    }
+
     var upcoming: [Song] { Array(playlist.dropFirst()) }
 
     /// Whether the currently-playing song is loved. True if the user loved
@@ -279,22 +317,37 @@ final class AppModel: ObservableObject, MediaSessionModel {
     // MARK: Auth
 
     func login() {
-        guard !username.isEmpty, !password.isEmpty else { return }
+        guard !username.isEmpty, !password.isEmpty, !loginInFlight else { return }
+        loginInFlight = true
         run("Logging in") { [weak self] in
             guard let self else { return }
+            defer { self.loginInFlight = false }
             if self.client == nil {
                 self.client = try PianoClient(
                     username: self.username, password: self.password)
             }
             guard let client = self.client else { return }
-            try await client.login()
+            do {
+                try await client.login()
+            } catch {
+                // NO NETWORK — not a rejected password — must never trap
+                // the user behind the login screen: open the app in
+                // offline mode, where the Offline Mix plays from cache.
+                if AppModel.isOfflineError(error) {
+                    self.enterOfflineMode()
+                    return
+                }
+                throw error
+            }
             self.loggedIn = true
+            self.offlineMode = false
             // Remember the credentials for next time. (If the keychain is
             // unavailable the login still works; we just won't auto-login
             // next time.)
             var saveStatus = Keychain.save(username: self.username, password: self.password)
             try await client.getStations()
             self.stations = client.stations()
+            self.saveStationSnapshot()
             // Restore the most recently played station (issue #4); fall
             // back to the first station if there's none saved or it's gone.
             if let last = self.lastStation.load(),
@@ -313,6 +366,8 @@ final class AppModel: ObservableObject, MediaSessionModel {
             } else {
                 self.status = "Logged in (couldn't remember credentials: OSStatus \(saveStatus)). \(self.stations.count) station(s)."
             }
+            // Queue may hold changes from offline mode — send them now.
+            self.startSyncLoop()
             do {
                 try await self.autoPlayFirstSongIfNeeded()
             } catch {
@@ -321,12 +376,49 @@ final class AppModel: ObservableObject, MediaSessionModel {
         }
     }
 
+    /// A network failure that means NO CONNECTION rather than a rejected
+    /// credential — anything else must keep showing a real error.
+    nonisolated static func isOfflineError(_ error: Error) -> Bool {
+        if error is URLError { return true }
+        if case PianoError.network = error { return true }
+        return false
+    }
+
+    /// No internet at launch/reconnect: open the app anyway. The Offline
+    /// Mix (cached songs) works with zero network; real stations wait for
+    /// a connection and retry automatically on foreground or Refresh.
+    private func enterOfflineMode() {
+        offlineMode = true
+        loggedIn = true
+        stations = []
+        playlist = []
+        player.stop()
+        media.clearNowPlaying()
+        selectedStationID = nil
+        offlineStations = stationSnapshot.load()
+        status = "Offline — pick Offline Mix to play cached songs."
+    }
+
+    /// Persist the current station list as plain names+ids so the list
+    /// survives offline (C Station structs die with the client).
+    private func saveStationSnapshot() {
+        stationSnapshot.save(stations.map {
+            SavedStation(id: $0.stableId, name: displayName(for: $0))
+        })
+    }
+
     func refreshStations() {
+        if offlineMode {
+            // While offline the refresh button IS the reconnect button.
+            login()
+            return
+        }
         guard let client = client else { return }
         run("Loading stations") { [weak self] in
             guard let self else { return }
             try await client.getStations()
             self.stations = client.stations()
+            self.saveStationSnapshot()
             // Re-point selection if the current one vanished.
             if let id = self.selectedStationID,
                !self.stations.contains(where: { $0.stableId == id }) {
@@ -365,6 +457,13 @@ final class AppModel: ObservableObject, MediaSessionModel {
         // and the next person to log in shouldn't be auto-started into it
         // (issue #4).
         lastStation.save(nil)
+        // Account-scoped offline state goes too: the snapshot belongs to
+        // this account's stations, and the mix queue references them.
+        offlineMode = false
+        offlineStations = []
+        stationSnapshot.clear()
+        mixQueue = []
+        mixJustPlayed = nil
         status = "Logged out."
     }
 
@@ -431,6 +530,7 @@ final class AppModel: ObservableObject, MediaSessionModel {
     /// The Player keeps exactly one song ahead; silently skipped when the
     /// upcoming song has no audio URL.
     private func prefetchNextSong() {
+        if isMixSelected { return }   // local files — nothing to download
         guard let next = upcoming.first,
               let urlString = next.audioUrl,
               let url = URL(string: urlString) else { return }
@@ -459,7 +559,22 @@ final class AppModel: ObservableObject, MediaSessionModel {
     /// song is playing we leave it running — switching stations mid-song is
     /// a deliberate "pause + switch" the user can act on.
     func stationDidSelect(_ id: String?) {
+        if id == Self.offlineMixID {
+            // Pseudo-station: stop whatever played and start the shuffle.
+            selectedStationID = id
+            playlist = []
+            showUpcoming = false
+            player.stop()
+            media.clearNowPlaying()
+            startOfflineMix()
+            return
+        }
+        mixQueue = []                       // leaving the Mix
         selectedStationID = id
+        if offlineMode, id != nil {
+            status = "Offline — reconnect to stream this station."
+            return
+        }
         guard let id,
               stations.contains(where: { $0.stableId == id }),
               player.isPlaying == false
@@ -473,9 +588,81 @@ final class AppModel: ObservableObject, MediaSessionModel {
         }
     }
 
+    // MARK: - Offline Mix (pseudo-station: every cached song, shuffled)
+
+    /// Start (or restart) the shuffled queue of ALL cached songs, ignoring
+    /// which station each came from. No network involved.
+    private func startOfflineMix() {
+        let fresh = playableMixEntries()
+        guard !fresh.isEmpty else {
+            status = "Nothing cached yet — play songs with the cache on first."
+            return
+        }
+        mixQueue = fresh.shuffled()
+        status = "Offline Mix — " + String(fresh.count) + " cached songs."
+        playNextMixSong(retriesLeft: fresh.count)
+    }
+
+    /// Entries whose audio file is actually still on disk (cachedFileURL
+    /// lazily drops dangling index rows while filtering).
+    private func playableMixEntries() -> [SongCache.Entry] {
+        songCache.allEntries().filter {
+            songCache.cachedFileURL(forKey: $0.key) != nil
+        }
+    }
+
+    /// Play the head of the shuffle queue. When a pass runs out the mix
+    /// behaves like a real station that never runs dry: a fresh shuffled
+    /// pass starts, and the just-played song never repeats back-to-back.
+    private func playNextMixSong(retriesLeft: Int) {
+        if mixQueue.isEmpty {
+            var next = playableMixEntries()
+            guard !next.isEmpty else {
+                status = "Offline Mix — cache is empty now."
+                player.stop()
+                media.clearNowPlaying()
+                playlist = []
+                return
+            }
+            if next.count > 1, let last = mixJustPlayed,
+               let i = next.firstIndex(where: { $0.key == last }) {
+                next.remove(at: i)
+            }
+            mixQueue = next.shuffled()
+        }
+        let entry = mixQueue.removeFirst()
+        guard let url = songCache.cachedFileURL(forKey: entry.key) else {
+            if retriesLeft > 0 {
+                playNextMixSong(retriesLeft: retriesLeft - 1)
+            }
+            return
+        }
+        // Drive the EXISTING transport: playlist.first is the mix song and
+        // playbackURL finds its cached file (which also refreshes its
+        // eviction age). markStationCurrent cannot fire: selectedStation
+        // is nil for the pseudo-station, so lastStation stays untouched.
+        var song = Song.offline(title: entry.title, artist: entry.artist,
+                                fileURL: url, musicId: entry.musicId,
+                                trackToken: entry.trackToken,
+                                stationId: entry.songStationId,
+                                loved: false)
+        if lovedSongIDs.contains(song.id) { song.rating = PIANO_RATE_LOVE }
+        playlist = [song]
+        showUpcoming = false
+        playIfAvailable()
+        mixJustPlayed = entry.key
+        status = "Offline Mix — " + entry.title + " — " + entry.artist
+    }
+
     func nextSong() {
+        if isMixSelected {
+            playNextMixSong(retriesLeft: 128)
+            return
+        }
         guard let client = client, let station = selectedStation else {
-            status = "Pick a station first."
+            status = offlineMode
+                ? "Offline — pick Offline Mix to play cached songs."
+                : "Pick a station first."
             return
         }
         // Songs a previous getPlaylist already returned are still valid to
@@ -538,7 +725,9 @@ final class AppModel: ObservableObject, MediaSessionModel {
             forMusicId: song.musicId, title: song.title, artist: song.artist))
         enqueue(.init(kind: .ban,
                       trackToken: song.trackToken,
-                      songStationId: song.stationId),
+                      songStationId: song.stationId,
+                      songTitle: song.title,
+                      songArtist: song.artist),
                 "Banned — syncing when online.")
         skipNow()
     }
@@ -555,7 +744,9 @@ final class AppModel: ObservableObject, MediaSessionModel {
             forMusicId: song.musicId, title: song.title, artist: song.artist))
         enqueue(.init(kind: .tired,
                       trackToken: song.trackToken,
-                      songStationId: song.stationId),
+                      songStationId: song.stationId,
+                      songTitle: song.title,
+                      songArtist: song.artist),
                 "Tired noted — syncing when online.")
         skipNow()
     }
@@ -605,7 +796,9 @@ final class AppModel: ObservableObject, MediaSessionModel {
             lovedSongIDs.insert(song.id)
             enqueue(.init(kind: .love,
                           trackToken: song.trackToken,
-                          songStationId: song.stationId),
+                          songStationId: song.stationId,
+                          songTitle: song.title,
+                          songArtist: song.artist),
                     "Loved — syncing when online.")
             // A loved song is the likeliest to return — store it now,
             // even under the loved-only policy.
@@ -629,7 +822,8 @@ final class AppModel: ObservableObject, MediaSessionModel {
     }
 
     /// Start the background drain if it isn't already running. Also called
-    /// after any successful interactive round trip (network proven).
+    /// after any successful interactive round trip (network proven) and
+    /// after a successful login.
     private func startSyncLoop() {
         guard syncTask == nil, client != nil, !pendingCommands.isEmpty
         else { return }
@@ -647,10 +841,18 @@ final class AppModel: ObservableObject, MediaSessionModel {
                 guard self.commandGate.tryAcquireForBackground() else {
                     continue   // an interactive job beat us to it
                 }
-                let retryLater = await self.syncPendingLocked()
+                let step = await self.syncOneLocked()
                 self.commandGate.release()
-                if retryLater {
-                    // Network dead — check again after a short backoff.
+                switch step {
+                case .sent:
+                    // RATE LIMIT: Pandora throttles bursts of taste
+                    // commands, and an Offline Mix session can queue
+                    // dozens at once. One command per cycle with a pause
+                    // BETWEEN sends — the pause happens OUTSIDE the gate,
+                    // so interactive taps always jump ahead during it.
+                    try? await Task.sleep(nanoseconds: 2_500_000_000)
+                case .retryLater:
+                    // Network dead — check again after a longer backoff.
                     try? await Task.sleep(nanoseconds: 20_000_000_000)
                 }
             }
@@ -660,50 +862,80 @@ final class AppModel: ObservableObject, MediaSessionModel {
         }
     }
 
-    /// Send queued commands in order, one at a time. Call only while
-    /// holding the gate. Returns true when the head command failed on the
-    /// network and should be retried later (it stays queued).
-    private func syncPendingLocked() async -> Bool {
-        guard let client else { return false }
-        var didSync = false
-        while let cmd = pendingCommands.first {
+    /// One drain step. Call only while holding the gate: resolves a
+    /// legacy token if needed, then sends the head command. The loop paces
+    /// sends (rate-limit) — this function sends exactly ONE command.
+    private enum SyncStep { case sent, retryLater }
+
+    private func syncOneLocked() async -> SyncStep {
+        guard let client else { return .retryLater }
+        guard var cmd = pendingCommands.first else { return .sent }
+        // Legacy cached song (cached before tokens were stored): resolve
+        // its taste token by search so the queued feedback can be sent,
+        // and heal the cache entry so future taps need no lookup.
+        if cmd.trackToken == nil,
+           cmd.kind == .love || cmd.kind == .ban || cmd.kind == .tired,
+           let title = cmd.songTitle, !title.isEmpty {
+            let artist = cmd.songArtist ?? ""
+            let match: SearchSong?
             do {
-                try await send(cmd, via: client)
-                pendingCommands.removeFirst()
-                pendingStore.save(pendingCommands)
-                didSync = true
-                afterSynced(cmd)
-            } catch let err as PianoError {
-                // Transient (dead/off network, Pandora maintenance, an
-                // auth token that outlived the queue) → keep and retry.
-                // Anything else is a server-side rejection the queue can't
-                // fix by waiting → drop it with a status note.
-                let transient: Bool
-                switch err {
-                case .network:
-                    transient = true
-                case .badData:
-                    transient = false
-                case .piano(let rc):
-                    transient = (rc == PIANO_RET_P_MAINTENANCE_MODE
-                              || rc == PIANO_RET_P_INSUFFICIENT_CONNECTIVITY
-                              || rc == PIANO_RET_P_READ_ONLY_MODE
-                              || rc == PIANO_RET_P_INVALID_AUTH_TOKEN)
-                }
-                if transient { return true }
-                pendingCommands.removeFirst()
-                pendingStore.save(pendingCommands)
-                status = "Sync failed: \(err.localizedDescription)"
+                let found = try await client.search(artist + " " + title)
+                match = Self.searchMatch(title: title, artist: artist,
+                                         in: found.songs)
             } catch {
-                // URLSession-level error (no route, DNS, timeout): keep
-                // the command and try again after the backoff.
-                return true
+                return .retryLater   // network dead — keep it queued
+            }
+            if let hit = match, let token = hit.trackToken {
+                cmd.trackToken = token
+                songCache.ensureCached(
+                    key: SongCache.key(forMusicId: hit.musicId,
+                                       title: hit.title, artist: hit.artist),
+                    remoteURL: nil, title: hit.title, artist: hit.artist,
+                    musicId: hit.musicId, trackToken: token)
+            } else {
+                pendingCommands.removeFirst()
+                pendingStore.save(pendingCommands)
+                status = "Couldn't sync — could not find \"\(title)\" "
+                    + "on Pandora. Play it once online to fix."
+                return .sent
             }
         }
-        if didSync, pendingCommands.isEmpty, !working {
-            status = "All changes synced to Pandora."
+        do {
+            try await send(cmd, via: client)
+            pendingCommands.removeFirst()
+            pendingStore.save(pendingCommands)
+            afterSynced(cmd)
+            if pendingCommands.isEmpty, !working {
+                status = "All changes synced to Pandora."
+            }
+            return .sent
+        } catch let err as PianoError {
+            // Transient (dead/off network, Pandora maintenance, an
+            // auth token that outlived the queue) → keep and retry.
+            // Anything else is a server-side rejection the queue can't
+            // fix by waiting → drop it with a status note.
+            let transient: Bool
+            switch err {
+            case .network:
+                transient = true
+            case .badData:
+                transient = false
+            case .piano(let rc):
+                transient = (rc == PIANO_RET_P_MAINTENANCE_MODE
+                          || rc == PIANO_RET_P_INSUFFICIENT_CONNECTIVITY
+                          || rc == PIANO_RET_P_READ_ONLY_MODE
+                          || rc == PIANO_RET_P_INVALID_AUTH_TOKEN)
+            }
+            if transient { return .retryLater }
+            pendingCommands.removeFirst()
+            pendingStore.save(pendingCommands)
+            status = "Sync failed: \(err.localizedDescription)"
+            return .sent
+        } catch {
+            // URLSession-level error (no route, DNS, timeout): keep
+            // the command and try again after the backoff.
+            return .retryLater
         }
-        return false
     }
 
     /// One queued command → Pandora. `quick: true` sends use a short
@@ -1189,6 +1421,12 @@ struct ContentView: View {
         .onAppear {
             if !model.loggedIn { focus = .username }
         }
+        .onReceive(NotificationCenter.default.publisher(
+            for: UIApplication.didBecomeActiveNotification)) { _ in
+            // Coming back to the app while offline: retry the real login
+            // (a success also re-arms the queued-command drain).
+            if model.offlineMode { model.login() }
+        }
     }
 
     private var stationBar: some View {
@@ -1198,8 +1436,20 @@ struct ContentView: View {
             set: { model.stationDidSelect($0) }
         )) {
                 Text("—").tag(String?.none)
-                ForEach(model.visibleStations) { s in
-                    Text(model.displayName(for: s)).tag(Optional(s.stableId))
+                // The pseudo-station: every cached song, shuffled, played
+                // from device storage — works with no connection at all.
+                Text("Offline Mix — " + String(model.cacheStats.count)
+                        + (model.cacheStats.count == 1 ? " song" : " songs"))
+                    .tag(Optional(AppModel.offlineMixID))
+                if model.offlineMode {
+                    // Names from the last online list (C structs are gone).
+                    ForEach(model.offlineStations) { s in
+                        Text(s.name).tag(Optional(s.id))
+                    }
+                } else {
+                    ForEach(model.visibleStations) { s in
+                        Text(model.displayName(for: s)).tag(Optional(s.stableId))
+                    }
                 }
             }
             .pickerStyle(.menu)
@@ -1208,6 +1458,22 @@ struct ContentView: View {
             // the previous station's queue until the user taps Next.
             .onChange(of: model.selectedStationID) { _ in
                 model.stationDidChange()
+            }
+            if model.isMixSelected {
+                Text("MIX")
+                    .font(.caption2.bold())
+                    .foregroundStyle(.green)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(.green.opacity(0.15), in: Capsule())
+            }
+            if model.offlineMode {
+                Text("OFFLINE")
+                    .font(.caption2.bold())
+                    .foregroundStyle(.orange)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(.orange.opacity(0.15), in: Capsule())
             }
         }
     }
@@ -1313,7 +1579,7 @@ struct ContentView: View {
 
     private var controlGrid: some View {
         let hasSong = model.currentSong != nil
-        let hasStation = model.selectedStation != nil
+        let hasStation = model.selectedStation != nil || model.isMixSelected
         let hasUpcoming = model.upcoming.count > 0
         let controls: [Control] = [
             // Order per issue #41: Delete/Rename/Select Stations, Explain/
@@ -1657,6 +1923,52 @@ private struct StationPickRow: Identifiable {
     var id: String { station.stableId }
 }
 
+// MARK: - Offline station-list snapshot
+//
+// Station rows from the last ONLINE list, kept as plain data: the real
+// Station values wrap C structs that die with the client, so with no
+// network (or a failed auto-login) the station bar renders these names
+// and the Offline Mix row instead of an empty list.
+
+struct SavedStation: Codable, Identifiable, Equatable {
+    let id: String
+    let name: String
+}
+
+/// UserDefaults-backed snapshot store (same pattern as LastStationStore
+/// and PendingCommandsStore; names are non-sensitive, no Keychain).
+struct StationSnapshotStore {
+    static let key = "cached-stations-v1"
+
+    var defaults: UserDefaults
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+    }
+
+    func load() -> [SavedStation] {
+        guard let data = defaults.data(forKey: Self.key),
+              let list = try? JSONDecoder().decode(
+                    [SavedStation].self, from: data)
+        else { return [] }
+        return list
+    }
+
+    func save(_ list: [SavedStation]) {
+        if list.isEmpty {
+            defaults.removeObject(forKey: Self.key)
+            return
+        }
+        if let data = try? JSONEncoder().encode(list) {
+            defaults.set(data, forKey: Self.key)
+        }
+    }
+
+    func clear() {
+        defaults.removeObject(forKey: Self.key)
+    }
+}
+
 // MARK: - Help sheet (what each button does)
 
 /// One row in the help sheet: icon, name, one-sentence explanation.
@@ -1677,6 +1989,8 @@ struct HelpSheet: View {
                   detail: "Removes the currently selected station from your list right away; it is deleted from your account (for good) when a connection is back."),
         HelpEntry(id: "rename", title: "Rename Station", systemImage: "pencil",
                   detail: "Renames the currently selected station right away; the change is queued and sent to Pandora when a connection is back."),
+        HelpEntry(id: "offlinemix", title: "Offline Mix", systemImage: "shuffle.circle",
+                  detail: "A station-list entry that shuffles every cached song and plays it straight from the device — works with no connection at all. Love, Ban and Tired work on its songs too, and sync to Pandora when the network returns."),
         HelpEntry(id: "quickmix", title: "Select Stations", systemImage: "shuffle",
                   detail: "On a QuickMix station, choose which of your stations to blend into the mix (checkmark list). Only skips to a new song if the current song is from an excluded station."),
         HelpEntry(id: "explain", title: "Explain", systemImage: "questionmark.circle",

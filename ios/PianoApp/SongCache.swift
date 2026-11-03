@@ -56,6 +56,15 @@ final class SongCache {
         var lastAccessed: Date
         let title: String
         let artist: String
+        /// Pandora identity captured at cache time so OFFLINE feedback
+        /// (love/ban/tired) can be queued and later sent: the C core reads
+        /// only trackToken + stationId for those requests. All optional —
+        /// entries written before this field existed decode fine (missing
+        /// keys → nil), and such legacy entries get their tokens backfilled
+        /// the next time the same song streams online (ensureCached hit).
+        var musicId: String? = nil
+        var trackToken: String? = nil
+        var songStationId: String? = nil
     }
 
     struct Stats: Equatable {
@@ -185,13 +194,34 @@ final class SongCache {
 
     // MARK: - Writes
 
-    /// Start caching a song: hit or duplicate → no-op; otherwise download
-    /// the remote audio in the background and insert it. Silent on failure
-    /// (the song already streams fine — this is a bonus copy).
+    /// Start caching a song: hit or duplicate → token backfill only;
+    /// otherwise download the remote audio in the background and insert
+    /// it. Silent on failure (the song already streams fine — this is a
+    /// bonus copy).
+    ///
+    /// `musicId`/`trackToken`/`stationId` are stored with the entry so the
+    /// Offline Mix can queue feedback for cached songs with no connection.
+    /// On a cache HIT the tokens are still merged in (never overwritten
+    /// with nil): this is what backfills entries written before tokens
+    /// were stored, as soon as the same song streams again online.
     func ensureCached(key: String?, remoteURL: URL?,
-                      title: String, artist: String) {
-        guard isEnabled, let key, let remoteURL else { return }
-        guard entries[key] == nil, !inFlight.contains(key) else { return }
+                      title: String, artist: String,
+                      musicId: String? = nil, trackToken: String? = nil,
+                      stationId: String? = nil) {
+        guard isEnabled, let key else { return }
+        if var entry = entries[key] {
+            var changed = false
+            if entry.musicId == nil, let m = musicId { entry.musicId = m; changed = true }
+            if entry.trackToken == nil, let t = trackToken { entry.trackToken = t; changed = true }
+            if entry.songStationId == nil, let s = stationId { entry.songStationId = s; changed = true }
+            if changed {
+                entries[key] = entry
+                saveIndex()
+                onChange?()
+            }
+            return
+        }
+        guard let remoteURL, !inFlight.contains(key) else { return }
         inFlight.insert(key)
         let ext = Self.audioExtension(remoteURL)
         session.downloadTask(with: remoteURL) { [weak self] tmp, response, error in
@@ -225,7 +255,9 @@ final class SongCache {
                     return
                 }
                 self.insertFile(at: dest, key: key, title: title,
-                                artist: artist, ext: ext)
+                                artist: artist, ext: ext,
+                                musicId: musicId, trackToken: trackToken,
+                                stationId: stationId)
             }
         }.resume()
     }
@@ -241,7 +273,9 @@ final class SongCache {
     /// finished background download) into the cache. Moves the file, then
     /// runs eviction. Takes exactly the file's real size into account.
     func insertFile(at fileURL: URL, key: String,
-                    title: String, artist: String, ext: String) {
+                    title: String, artist: String, ext: String,
+                    musicId: String? = nil, trackToken: String? = nil,
+                    stationId: String? = nil) {
         let fm = FileManager.default
         guard let attrs = try? fm.attributesOfItem(atPath: fileURL.path),
               let size = attrs[.size] as? Int64, size > 0 else {
@@ -265,9 +299,17 @@ final class SongCache {
             }
         }
         let date = now()
+        // Re-insert of a known key (format change / re-download): keep the
+        // original added-date and any tokens already stored, filling in
+        // from the new call.
         entries[key] = Entry(key: key, fileName: dest.lastPathComponent,
-                             bytes: size, addedAt: date, lastAccessed: date,
-                             title: title, artist: artist)
+                             bytes: size,
+                             addedAt: entries[key]?.addedAt ?? date,
+                             lastAccessed: date,
+                             title: title, artist: artist,
+                             musicId: musicId ?? entries[key]?.musicId,
+                             trackToken: trackToken ?? entries[key]?.trackToken,
+                             songStationId: stationId ?? entries[key]?.songStationId)
         evictIfNeeded()
         saveIndex()
         onChange?()
@@ -307,6 +349,9 @@ final class SongCache {
     }
 
     // MARK: - Stats
+
+    /// All cached entries (Offline Mix builds its shuffle from this).
+    func allEntries() -> [Entry] { Array(entries.values) }
 
     func stats() -> Stats {
         var s = Stats(capBytes: capBytes)
