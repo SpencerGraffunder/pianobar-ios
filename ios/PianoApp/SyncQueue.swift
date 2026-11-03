@@ -33,6 +33,10 @@ struct QueuedCommand: Codable, Equatable {
     /// `stationId` from a song for rate/tired (see PianoClient.makeCSong).
     var trackToken: String? = nil
     var songStationId: String? = nil
+    /// Song name, carried so a command queued for a cached song that predates
+    /// token storage (trackToken nil) can be resolved by search at send time.
+    var songTitle: String? = nil
+    var songArtist: String? = nil
     /// Target station for addSeed / rename / deleteStation.
     var stationId: String? = nil
     var musicId: String? = nil

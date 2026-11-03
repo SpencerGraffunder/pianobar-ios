@@ -121,4 +121,73 @@ final class SyncQueueTests: XCTestCase {
         await b.value
         XCTAssertEqual(order, [1, 2])
     }
+
+    // MARK: Offline Mix command support
+
+    func testCommandCarriesSongName() throws {
+        let suite = "SyncQ.name.\(UUID().uuidString)"
+        let store = PendingCommandsStore(
+            defaults: UserDefaults(suiteName: suite)!)
+        defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        let cmd = QueuedCommand(kind: .love, trackToken: nil,
+                               songStationId: nil,
+                               songTitle: "Song (Remastered)",
+                               songArtist: "Act")
+        store.save([cmd])
+        let back = store.load()
+        XCTAssertEqual(back, [cmd])
+        XCTAssertEqual(back[0].songTitle, "Song (Remastered)")
+    }
+
+    func testCommandDecodesPreSongNameJSON() throws {
+        // A command written before songTitle/songArtist existed must still
+        // load (the queue persists across launches).
+        let data = try JSONEncoder().encode(
+            [ ["kind": "love", "trackToken": "C1"] ])
+        let cmds = try JSONDecoder().decode([QueuedCommand].self, from: data)
+        XCTAssertEqual(cmds.count, 1)
+        XCTAssertEqual(cmds[0].trackToken, "C1")
+        XCTAssertNil(cmds[0].songTitle)
+    }
+
+    func testSnapshotStoreRoundTrip() {
+        let suite = "SyncQ.snap.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        var store = StationSnapshotStore(defaults: defaults)
+        XCTAssertEqual(store.load(), [])
+        store.save([SavedStation(id: "S1", name: "My Station"),
+                    SavedStation(id: "S2", name: "Other")])
+        XCTAssertEqual(store.load().map(\.name), ["My Station", "Other"])
+        store.clear()
+        XCTAssertEqual(store.load(), [])
+        defaults.removePersistentDomain(forName: suite)
+        _ = store
+    }
+
+    // MARK: Legacy token resolution
+
+    func testNormalizeSongName() {
+        XCTAssertEqual(AppModel.normalizeSongName("Song (Remastered)!"),
+                       "songremastered")
+        XCTAssertEqual(AppModel.normalizeSongName("  a-b  c "), "abc")
+    }
+
+    func testSearchMatchNeedsExactNameAndToken() {
+        let hits = [
+            SearchSong(title: "Other", artist: "Act", musicId: "M1",
+                       trackToken: "C1"),
+            SearchSong(title: "Song (Remastered)", artist: "Act",
+                       musicId: "M2", trackToken: nil),   // no token
+            SearchSong(title: "Song  Remastered", artist: "ACT",
+                       musicId: "M3", trackToken: "C3"),  // the match
+        ]
+        let m = AppModel.searchMatch(title: "Song Remastered", artist: "Act",
+                                     in: hits)
+        XCTAssertEqual(m?.musicId, "M3")
+        // Artist missing → no guessing (a wrong token would rate the wrong song).
+        XCTAssertNil(AppModel.searchMatch(title: "Song Remastered",
+                                          artist: "", in: hits))
+        XCTAssertNil(AppModel.searchMatch(title: "Nowhere Song",
+                                          artist: "Act", in: hits))
+    }
 }

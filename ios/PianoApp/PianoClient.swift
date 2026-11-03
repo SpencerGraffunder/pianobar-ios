@@ -113,6 +113,27 @@ struct Song: Identifiable, Hashable {
         rating = s.rating
         audioFormat = s.audioFormat
     }
+
+    /// Synthesize a playable Song for a cached file with NO server
+    /// playlist (the Offline Mix). Fields the core never sees are zeroed;
+    /// `audioUrl` is the local file URL so every existing playback path
+    /// (playbackURL, resume, lock screen) works untouched. The stored
+    /// tokens make offline love/ban/tired queueable for when the network
+    /// returns; nil tokens mark a legacy entry (resolved via search at
+    /// send time, see AppModel.send(_:via:)).
+    static func offline(title: String, artist: String, fileURL: URL,
+                        musicId: String?, trackToken: String?,
+                        stationId: String?, loved: Bool) -> Song {
+        var s = Song(PianoSong())     // zeroed: all pointers nil, scalars 0
+        s.title = title
+        s.artist = artist
+        s.audioUrl = fileURL.absoluteString
+        s.musicId = musicId
+        s.trackToken = trackToken
+        s.stationId = stationId
+        s.rating = loved ? PIANO_RATE_LOVE : PIANO_RATE_NONE
+        return s
+    }
 }
 
 /// A search-result artist (value copy; safe to store).
@@ -127,6 +148,10 @@ struct SearchSong: Identifiable, Hashable {
     let title: String
     let artist: String
     let musicId: String
+    /// Pandora taste token when the search response carried one — used to
+    /// resolve feedback commands for cached songs that predate token
+    /// storage (nil-safe: older servers/responses simply omit it).
+    let trackToken: String?
     var id: String { musicId }
 }
 
@@ -547,7 +572,8 @@ final class PianoClient {
                     result.songs.append(SearchSong(
                         title: cstr(s.pointee.title) ?? "?",
                         artist: cstr(s.pointee.artist) ?? "",
-                        musicId: cstr(s.pointee.musicId) ?? ""))
+                        musicId: cstr(s.pointee.musicId) ?? "",
+                        trackToken: cstr(s.pointee.trackToken)))
                     scur = s.pointee.head.next.map {
                         UnsafeMutableRawPointer($0)
                             .assumingMemoryBound(to: PianoSong.self)
