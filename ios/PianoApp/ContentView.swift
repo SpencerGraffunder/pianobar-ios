@@ -57,6 +57,13 @@ final class AppModel: ObservableObject, MediaSessionModel {
     /// Pseudo-station id for the cached-songs shuffle.
     static let offlineMixID = "offline-mix"
 
+    /// Consecutive playback failures (a song's stream failed to load).
+    /// Reset when a song plays to the end; the station gives up after this
+    /// many in a row — mirrors the C core's maxRetry = 5 ("should be > 4,
+    /// otherwise expired audio urls (403) can stop playback").
+    private var consecutivePlaybackFailures = 0
+    private static let maxConsecutivePlaybackFailures = 5
+
     // optimistic sync (server changes applied locally, sent when possible)
     /// Changes already reflected in the UI, waiting to reach Pandora.
     @Published private(set) var pendingCommands: [QueuedCommand] = []
@@ -137,7 +144,23 @@ final class AppModel: ObservableObject, MediaSessionModel {
         player.onSongFinished = { [weak self] in
             guard let self else { return }
             MainActor.assumeIsolated {
+                // A song that played to the end is a clean slate — the C
+                // core resets playerErrors on a clean finish
+                // (PLAYER_RET_OK).
+                self.consecutivePlaybackFailures = 0
                 self.nextSong()
+            }
+        }
+        // When a song's stream fails to load (403 from an expired or
+        // rejected stream URL, dead network), skip to the next song
+        // instead of stopping the station — mirrors the C core's
+        // SOFTFAIL handling (issue #72). The KVO that fires this can land
+        // on an AVFoundation thread, so hop to the main actor before
+        // touching model state.
+        player.onPlaybackFailed = { [weak self] in
+            guard let self else { return }
+            Task { @MainActor in
+                self.handlePlaybackFailure()
             }
         }
         media = MediaSession(model: self)
@@ -707,6 +730,36 @@ final class AppModel: ObservableObject, MediaSessionModel {
             // audio URL) — fetch the next song from the station and start it.
             nextSong()
         }
+    }
+
+    /// A song's stream failed to load: Pandora rejected the URL (an
+    /// expired signed link, or a song this account can't stream) or the
+    /// network died. The C core treats that as a SOFTFAIL — skip the song
+    /// and play the next one, up to maxRetry consecutive failures. Same
+    /// here: the station keeps moving instead of going dead with a
+    /// cryptic AVPlayer error (issue #72).
+    private func handlePlaybackFailure() {
+        // A new song already started (a fast Next tap landed during the
+        // failure) — don't skip on its behalf.
+        guard loggedIn, !player.isPlaying else { return }
+        if isMixSelected {
+            // A missing/corrupt cached file must not stop the mix.
+            status = "Couldn't play that cached song — skipping."
+            nextSong()
+            return
+        }
+        consecutivePlaybackFailures += 1
+        if consecutivePlaybackFailures >= Self.maxConsecutivePlaybackFailures {
+            // Too many in a row: stop instead of looping, with a message
+            // the user can act on. Next or a station pick restarts
+            // cleanly; a clean finish resets the counter.
+            status = "Playback keeps failing — Pandora keeps rejecting the stream. Tap Next or pick a station to restart."
+            player.stop()
+            media.clearNowPlaying()
+            return
+        }
+        status = "Couldn't play that song — Pandora rejected the stream (expired link, or a song your plan can't play). Skipping."
+        nextSong()
     }
 
     // MARK: Rating (optimistic — the server command queues behind)
