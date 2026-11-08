@@ -75,6 +75,14 @@ final class Player: ObservableObject {
     /// fetch and start the next song (issue #16). Nil if no one is watching.
     var onSongFinished: (() -> Void)?
 
+    /// Invoked when the current item fails terminally (load error: a 403
+    /// from an expired or rejected Pandora stream URL, ATS, bad codec).
+    /// The owning model skips to the next song instead of letting the
+    /// station go dead — the upstream pianobar C core treats a failed
+    /// audio URL the same way (SOFTFAIL, next song, up to maxRetry).
+    /// Nil if no one is watching.
+    var onPlaybackFailed: (() -> Void)?
+
     init() {
         // Restore the saved playback speed (Windows parity: playback_speed
         // in the config). Clamp in case the stored value is out of range.
@@ -118,6 +126,10 @@ final class Player: ObservableObject {
                 self.lastError = "Playback failed: " +
                     (err?.localizedDescription ?? "unknown error")
                 self.isPlaying = false
+                // Hand the terminal failure to the owner: AppModel skips
+                // to the next song instead of stopping the station (see
+                // onPlaybackFailed).
+                self.onPlaybackFailed?()
             }
         }
         endObserver = NotificationCenter.default.addObserver(
@@ -179,6 +191,10 @@ final class Player: ObservableObject {
             self.endObserver = nil
         }
         isPlaying = false
+        // The item the error (if any) belonged to is torn down — a stale
+        // red error would otherwise outlive the failed song and hide the
+        // model's own status message.
+        lastError = nil
         // Whatever was queued in the future is no longer wanted (new song
         // starting, station switch, logout) — drop the download and file.
         cancelPrefetch()
