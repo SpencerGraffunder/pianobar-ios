@@ -18,9 +18,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0</string>
+	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<!--
 		This is a Pandora streaming client. Two classes of traffic are plain HTTP
 		(the original libcurl/ffplay-based pianobar does the same):
