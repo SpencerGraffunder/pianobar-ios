@@ -212,4 +212,8 @@ jobs:
           DEST="$HOME/Library/Mobile Documents/com~apple~CloudDocs/IPAs"
           mkdir -p "$DEST"
           cp -f "$ASSET" "$DEST/$ASSET"
+          # Newest-only policy (2026-11-14, Spec standing rule): drop
+          # superseded pianobar builds (and legacy unversioned copies) from
+          # the shared collection folder — pianobar prefix only.
+          find "$DEST" -maxdepth 1 -type f \( -name 'pianobar*.ipa' -o -name 'pb.ipa' \) ! -name "$ASSET" -delete
           ls -lh "$DEST"
